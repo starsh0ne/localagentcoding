@@ -1,15 +1,17 @@
 [project]
 name = "pomodoro-cli"
-version = "1.1.0"
-description = "番茄钟CLI应用（支持任务标签）- 提高工作效率的好帮手"
-requires-python = ">=3.10"
+version = "2.0.0"
+description = "单文件番茄钟 CLI：交互式 REPL + 子命令，JSON 持久化，重启可恢复未完成计时"
+readme = "README.md"
+requires-python = ">=3.12"
 dependencies = []
 
-[project.scripts]
-pomodoro = "pomodoro:main"
+# 纯脚本项目：无需构建/安装项目自身，uv run 直接执行 pomodoro.py
+[tool.uv]
+package = false
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

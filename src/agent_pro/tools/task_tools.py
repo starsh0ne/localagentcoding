@@ -4,7 +4,7 @@
 # ============================================================
 from langchain.tools import tool
 from agent_pro.tasks.store import get_task_store
-
+from agent_pro.api.bus import get_event_bus
 
 def _tree(root, prefix: str = "") -> list[str]:
     """递归文件树"""
@@ -85,7 +85,14 @@ def make_task_tools(task_id: str | None) -> list:
     def update_progress(note: str, finished: bool = False) -> str:
         """向共享状态记录进度。note说明: 完成了什么/发现的问题/下一步计划；
         需求不明时在note中写明你的假设。全部交付且自检通过时 finished=True。"""
-        store.append_progress(task_id, note, finished)
+        pid = store.append_progress(task_id, note, finished)
+        # v0.5: 推送到任务事件流(SSE实时可见)
+        bus = get_event_bus()
+        topic = f"task:{task_id}"
+        bus.publish(topic, "progress",
+                    {"pid": pid, "note": note, "finished": finished})
+        if finished:
+            bus.publish(topic, "task_done", {"task_id": task_id})
         return f"进度已记录: {note[:80]}"
 
     return [read_task_plan, update_progress]

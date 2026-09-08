@@ -1,10 +1,11 @@
 # ============================================================
-# tasks/store.py | v0.4 诞生（TaskStore: 计划书/进度/子目录 共享状态）
-# 通用agent写计划书与验收; coder追加进度; 代码写入 tasks/<task_id>/
+# tasks/store.py | v0.4诞生 → v0.5变更
+#   +线程安全(lock) +append_progress返回pid(SSE去重用)
+#   +progress_history(升序全量, SSE历史回放用)
 # ============================================================
 import secrets
 import sqlite3
-from dataclasses import dataclass
+import threading
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -19,7 +20,8 @@ def _now() -> str:
 class TaskStore:
     def __init__(self, db_path: Path, workspace_root: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self._lock = threading.RLock()
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript("""
         CREATE TABLE IF NOT EXISTS tasks(
@@ -35,35 +37,54 @@ class TaskStore:
 
     def create_task(self, title: str, plan: str) -> str:
         task_id = f"t{datetime.now():%Y%m%d}_{secrets.token_hex(3)}"
-        self.conn.execute(
-            "INSERT INTO tasks(id, title, status, plan, created_at, updated_at)"
-            " VALUES(?,?,?,?,?,?)", (task_id, title, "created", plan, _now(), _now()))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO tasks(id, title, status, plan, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (task_id, title, "created", plan, _now(), _now()))
+            self.conn.commit()
         (self.tasks_dir / task_id).mkdir(parents=True, exist_ok=True)
         return task_id
 
     def update_plan(self, task_id: str, plan: str) -> bool:
-        cur = self.conn.execute(
-            "UPDATE tasks SET plan=?, updated_at=? WHERE id=?", (plan, _now(), task_id))
-        self.conn.commit()
-        return cur.rowcount > 0
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE tasks SET plan=?, updated_at=? WHERE id=?",
+                (plan, _now(), task_id))
+            self.conn.commit()
+            return cur.rowcount > 0
 
     def get(self, task_id: str) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        with self._lock:
+            return self.conn.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
 
-    def append_progress(self, task_id: str, note: str, finished: bool = False) -> None:
-        self.conn.execute(
-            "INSERT INTO task_progress(task_id, note, created_at) VALUES(?,?,?)",
-            (task_id, note, _now()))
-        status = "delivered" if finished else "in_progress"
-        self.conn.execute(
-            "UPDATE tasks SET status=?, updated_at=? WHERE id=?", (status, _now(), task_id))
-        self.conn.commit()
+    def append_progress(self, task_id: str, note: str,
+                        finished: bool = False) -> int:
+        """v0.5: 返回progress行id(pipeline去重用)"""
+        with self._lock:
+            cur = self.conn.execute(
+                "INSERT INTO task_progress(task_id, note, created_at)"
+                " VALUES(?,?,?)", (task_id, note, _now()))
+            pid = cur.lastrowid
+            self.conn.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+                ("delivered" if finished else "in_progress", _now(), task_id))
+            self.conn.commit()
+        return pid
 
     def progress_list(self, task_id: str, limit: int = 20) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT note, created_at FROM task_progress WHERE task_id=?"
-            " ORDER BY id DESC LIMIT ?", (task_id, limit)).fetchall()
+        with self._lock:
+            return self.conn.execute(
+                "SELECT note, created_at FROM task_progress WHERE task_id=?"
+                " ORDER BY id DESC LIMIT ?", (task_id, limit)).fetchall()
+
+    def progress_history(self, task_id: str, limit: int = 100) -> list[sqlite3.Row]:
+        """v0.5新增: 升序历史(SSE回放)"""
+        with self._lock:
+            return self.conn.execute(
+                "SELECT id, note, created_at FROM task_progress WHERE task_id=?"
+                " ORDER BY id ASC LIMIT ?", (task_id, limit)).fetchall()
 
     def resolve_task_context(self, task_id: str) -> TaskContext | None:
         row = self.get(task_id)

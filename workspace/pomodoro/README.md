@@ -1,205 +1,134 @@
-# 🍅 番茄钟 CLI 应用
+# 🍅 番茄钟 CLI（单文件 / uv 管理 / Python 3.12）
 
-一个简洁高效的命令行番茄钟工具，帮助你保持专注、提高工作效率。
+一个**单文件**番茄钟命令行应用。纯标准库、零第三方依赖（测试除外），
+计时基于**持久化的时间戳推算**，因此：
 
-## 功能特性
+- `start / pause / resume / reset / stats` 可以在任意终端执行；
+- 程序被强杀、断电或正常退出后重启，未完成的番茄钟与剩余时间**精确恢复**，不会丢失；
+- 今日统计由历史记录（每条含开始/结束时间）自动聚合。
 
-- ✅ **开始/暂停/重置**：完整的番茄钟控制
-- ✅ **工作/休息模式**：25分钟工作 + 5分钟休息
-- ✅ **任务标签**：为每个番茄钟会话打标签，按标签统计专注情况
-- ✅ **今日统计**：完成的番茄钟数量、专注时长、按标签概览
-- ✅ **历史记录**：查看最近几天的统计与本日主要标签
-- ✅ **数据持久化**：JSON文件存储，数据不丢失
-- ✅ **健壮性**：崩溃残留自动清理、损坏数据容错
-- ✅ **交互式菜单**：友好的命令行交互界面
+## 文件位置
 
-## 快速开始
+项目位于工作区 `pomodoro/` 目录：
 
-### 直接运行
+```
+pomodoro/
+├── pomodoro.py        # 唯一代码文件（CLI 应用本体）
+├── pyproject.toml     # uv 项目配置（Python >=3.12，无运行时依赖）
+├── .python-version    # uv 锁定 3.12
+├── README.md          # 本文件
+└── tests/
+    └── test_pomodoro.py  # 纯逻辑单元测试（dev 依赖 pytest）
+```
+
+## 运行方式（uv）
 
 ```bash
-python pomodoro.py
+cd pomodoro
+
+uv run python pomodoro.py                 # 交互式 REPL（键盘输入命令）
+uv run python pomodoro.py --help          # 查看全部子命令与示例
 ```
 
-### 使用 uv 运行
+常用示例命令：
 
 ```bash
-uv run pomodoro.py
+# 开始：默认 25 分钟；也可指定时长与任务标签
+uv run python pomodoro.py start
+uv run python pomodoro.py start 50
+uv run python pomodoro.py start 50 写周报
+
+# 生命周期
+uv run python pomodoro.py pause           # 暂停（记录已专注秒数）
+uv run python pomodoro.py resume          # 继续
+uv run python pomodoro.py reset           # 放弃当前番茄钟（已专注部分记入历史）
+uv run python pomodoro.py status          # 状态 + 剩余时间 + 进度条
+
+# 今日统计 / 全部统计
+uv run python pomodoro.py stats           # 今天完成数量、累计专注时长、明细
+uv run python pomodoro.py stats --all
+
+# 实时倒计时视图（结束时响铃提示；Ctrl+C 仅退出视图，计时不受影响）
+uv run python pomodoro.py watch
 ```
 
-## 使用方法
+### 交互式 REPL
 
-### 命令行参数
+不带子命令进入。输入命令后回车即可，支持单字母简写：
+
+```
+🍅 idle> start 50 写周报
+🍅 run 49:51> pause
+🍅 pause 49:51> resume
+🍅 run 49:47> stats
+🍅 idle> quit
+```
+
+完整命令：`start [分钟] [标签...]`、`pause(p)`、`resume(r)`、`reset(x)`、
+`status(s)`、`watch(w)`、`stats(t)[all]`、`help(h)`、`quit(q)/exit`。
+
+> 注：运行中的番茄钟会显示在提示符里（如 `run 24:58>`），输入任意命令
+> （或直接回车刷新）时都会按真实时间结算，因此即使“忘了它”，到期也会补记完成。
+
+## JSON 数据文件
+
+- 默认：`~/.pomodoro.json`
+- 覆盖方式：`--file <路径>` 或环境变量 `POMODORO_FILE=<路径>`
 
 ```bash
-# 开始工作番茄钟（25分钟）
-python pomodoro.py start
-
-# 开始休息番茄钟（5分钟）
-python pomodoro.py start --break
-
-# 带任务标签开始工作番茄钟
-python pomodoro.py start --tag 写周报
-
-# 休息模式也可带标签
-python pomodoro.py start --break --tag 午休
-
-# 继续暂停的番茄钟
-python pomodoro.py resume
-
-# 暂停提示（真正的暂停需在运行番茄钟的终端按 Ctrl+C）
-python pomodoro.py pause
-
-# 查看当前状态
-python pomodoro.py status
-
-# 查看今日统计
-python pomodoro.py stats
-
-# 查看指定日期统计
-python pomodoro.py stats --date 2024-01-15
-
-# 查看历史记录（默认7天）
-python pomodoro.py history
-python pomodoro.py history --days 30
-
-# 重置番茄钟
-python pomodoro.py reset
-
-# 进入交互式菜单
-python pomodoro.py
+uv run python pomodoro.py --file ./data.json start 25
+POMODORO_FILE=./data.json uv run python pomodoro.py stats
 ```
 
-### 交互式菜单
+写入采用“先写临时文件再原子替换”，不会留下写一半的损坏文件；文件损坏时自动
+改名备份为 `*.corrupt-<时间戳>` 并从空数据恢复。
 
-不带参数运行会进入交互式菜单；选择「1. 开始工作番茄钟」或「2. 开始休息番茄钟」后，
-会继续询问任务标签（可直接回车跳过）：
+### 数据结构
 
-```
-========================================
-🍅 番茄钟 - 交互式菜单
-========================================
-  1. 开始工作番茄钟 (25分钟，可带标签)
-  2. 开始休息番茄钟 (5分钟，可带标签)
-  3. 继续番茄钟
-  4. 查看状态
-  5. 今日统计
-  6. 历史记录
-  7. 重置番茄钟
-  0. 退出
-----------------------------------------
-请选择操作 (0-7): 1
-   任务标签（可回车跳过）: 写周报
-```
-
-### 关于暂停（pause）
-
-本应用为单进程架构，`pause` 命令**无法真正暂停**另一个终端正在运行的计时进程。
-运行 `python pomodoro.py pause` 只会给出提示：
-
-- 真正的暂停：请在**运行番茄钟的那个终端**按 `Ctrl+C`
-- 暂停后可用 `python pomodoro.py resume` 继续
-
-该命令保留仅为了 CLI 兼容文档，功能提示已如实说明。
-
-### 崩溃恢复
-
-若番茄钟计时进程被强杀 / 断电（非 Ctrl+C），状态文件中会残留 `status: "running"`
-的记录。下次运行任一命令时，程序检测到该状态已远超目标时长（含 60 秒缓冲）即判定为
-异常残留，自动清理并提示，可正常重新开始，不会被误判为「已在运行中」。
-
-## 数据存储
-
-数据保存在两个 JSON 文件中，**固定存放在 `pomodoro.py` 所在目录**（即脚本目录，
-一般为仓库根目录），因此无论从哪个工作目录（cwd）运行，读写到的都是同一份数据：
-
-- `<脚本目录>/pomodoro_data.json` - 历史记录
-- `<脚本目录>/pomodoro_state.json` - 当前状态（用于暂停/继续/完成）
-
-## 数据结构
-
-### 历史记录 `pomodoro_data.json`
-
-```json
+```jsonc
 {
-  "sessions": [
+  "version": 1,
+  "state": {                                   // 当前计时状态（跨重启恢复）
+    "status": "running",                        // "idle" | "running" | "paused"
+    "duration_minutes": 25,                     // 本番茄钟计划分钟数
+    "label": "写周报",                           // 可选任务标签
+    "started_at": "2025-01-01T09:00:00+08:00",  // 本番茄钟最初开始时刻
+    "running_from": "2025-01-01T09:10:00+08:00",// 最近一次 resume 的时刻
+    "elapsed_seconds": 600                      // running_from 之前已专注秒数
+  },
+  "history": [                                  // 历史记录（今日统计数据源）
     {
-      "date": "2024-01-15",
-      "start_time": "09:00:00",
-      "end_time": "09:25:00",
-      "duration_minutes": 25,
-      "completed": true,
-      "mode": "work",
-      "tag": "写周报"
+      "completed": true,                        // true=完成, false=中途放弃
+      "planned_minutes": 25,
+      "focus_seconds": 1500,                    // 实际专注秒数
+      "started_at": "2025-01-01T09:00:00+08:00",
+      "ended_at":   "2025-01-01T09:25:00+08:00",
+      "label": "写周报"
     }
   ]
 }
 ```
 
-> `tag` 为新增可选字段（1.1.0）。旧数据没有该字段时按「无标签」处理，
-> 展示与统计均不受影响，不会因缺字段报错。无标签的会话不会写入 `tag` 字段。
-
-### 状态文件 `pomodoro_state.json`
-
-```json
-{
-  "status": "running",
-  "mode": "work",
-  "start_time": "2024-01-15T09:00:00.123456",
-  "elapsed_seconds": 0,
-  "target_seconds": 1500,
-  "tag": "写周报"
-}
-```
-
-`tag` 同样携带于状态文件中，确保暂停 / 继续 / 完成全程保留任务标签。
-
-## 运行截图（含标签）
+剩余时间的推算规则（保证重启恢复）：
 
 ```
-🍅 开始工作番茄钟 (25分钟)
-   📌 任务标签: 写周报
-   按 Ctrl+C 可暂停
-   ⏱️  剩余: 24:58 📌 写周报 
-
-⏸️  已暂停 (已运行 00:02)
-   📌 任务标签: 写周报
-
-▶️  继续番茄钟...
-   ⏱️  剩余: 24:56 📌 写周报 
-
-🎉 工作番茄钟完成！
-   时长: 25分钟
-   完成时间: 09:25:00
-   📌 任务标签: 写周报
-
-📊 2024-01-15 番茄钟统计
-========================================
-  🍅 工作番茄钟: 1 个
-  ☕ 休息番茄钟: 0 个
-  ⏱️  总专注时长: 25 分钟 (0h 25m)
-  🛋️  总休息时长: 0 分钟
-
-  🏷️  按任务标签（工作番茄钟）:
-     · 写周报: 1 个 / 专注 25 分钟
-
-  📝 详细记录:
-     1. 🍅 09:00:00 - 09:25:00 (25分钟) [📌 写周报]
+status == running:
+    剩余秒数 = duration_minutes*60 − elapsed_seconds − (now − running_from)
+status == paused:
+    剩余秒数 = duration_minutes*60 − elapsed_seconds
 ```
 
-## 运行测试
+## 测试
 
-测试仅依赖 pytest（dev 依赖组），覆盖暂停/继续状态机、剩余时间推算、崩溃残留
-判定与自动清理、stats 聚合（含 tag 与旧数据兼容）等纯逻辑：
+测试仅覆盖纯逻辑（状态机/剩余推算/统计聚合），dev 组依赖 pytest：
 
 ```bash
-uv run pytest        # 使用 uv 运行
-# 或
-python -m pytest
+uv sync --group dev
+uv run --group dev pytest
 ```
 
 ## 技术栈
 
-- Python 3.10+
-- 标准库（无第三方依赖，tests 除外）
-- JSON 数据持久化
+- Python ≥ 3.12（`.python-version` 固定 3.12），uv 管理
+- 标准库 only：`argparse / json / datetime / pathlib / subprocess` 等
+- 无第三方运行时依赖，因此**无需 `uv add`** 任何包

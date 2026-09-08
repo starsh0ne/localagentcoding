@@ -61,6 +61,18 @@
 - **当前处置**：`general.build_general_agent` 增加 `extra_tools: list | None = None` 并并入工具集。
 - **1.0 建议**：固定 `build_general_agent` 的装配契约，或让 `create_app_agent` 直接构造通用 Agent，避免「两处签名必须手同步」。
 
+### 19. v0.5 SSE `/events` 回放 `final` 不关闭流
+- **现象**：任务跑完「之后」才连 `GET /api/chat/turns/{id}/events`，流先回放 `final` 事件，随后不关闭、持续发 `: ping` 心跳，客户端永久挂起。
+- **根因**：`server.py:83-84` 回放循环只 `yield` 事件、未对 `final`/`error` 做 `break`；`server.py:92` 的终止判断仅在「实时事件」分支。晚连接（任务已完成）时 `final` 只在 replay 里被 yield 一次，随后的 `while True` 永远等新事件。
+- **当前处置**：进行中连接（任务未结束就连）会在 `final` 到达时正常关闭；仅「晚连接」场景挂死。
+- **1.0 建议**：回放循环内对 `final`/`error` 也要 break（或抽出统一的「收到终止事件即 break」判断，覆盖 replay 与实时两条路径）。
+
+### 20. v0.5 中文消息输入乱码（mojibake）
+- **现象**：`curl.exe -N` 订阅 events 拿到 `event: final`，但 agent 回复称「你的消息显示成乱码（中文变成 `?`），没读到需求」。SSE 输出侧中文正常（curl 渲染正确），说明乱码在输入侧。
+- **根因**：用户中文消息经 PowerShell `Invoke-RestMethod -Body '{"message":"中文..."}'` 发出后，到 agent 时已变 `?`。`?` 是「以无法表示中文的编码（cp1252/ascii 之类，`errors='replace'`）编码」的典型产物；SSE 输出用 `json.dumps(..., ensure_ascii=False)` 正确保留中文，已排除输出侧。
+- **当前处置**：**根因已确认 = 客户端 PowerShell 内联 `-d` 编码**（非服务端）。证据：`turn-20260908-214210-40bcda` 用 `-d @body.json`（UTF-8 文件）创建后，订阅其 `/events` 拿到 `event: tool_call` 的 `dispatch_to_coder`，`args_brief` 中中文 **番茄钟** 完整无缺 → 服务端存储/解码正确、agent 读中文正确。先前用 PS 内联 `-d "{\"message\":\"...中文...\"}"` 才会把中文烧成 `?`（`?` 是 cp1252/ascii `errors='replace'` 产物）。SSE 输出侧 `json.dumps(..., ensure_ascii=False)` 也一直正确。结论：**服务端无中文乱码问题**。
+- **1.0 建议**：① 仅客户端侧修正——发 JSON 一律走 UTF-8 文件（`curl -d @file.json`）或 PS UTF-8 字节数组，禁内联中文 `-d`；② 服务端可加 `charset=utf-8` 显式声明（防御性，非必需）；③ 加一条中文往返冒烟测试固化该结论。
+
 ---
 
 ## 二、🛡️ 健壮性缺口（当前能跑，遇边界会崩或误导）
@@ -84,6 +96,18 @@
 - **现象**：`git init && ...`、`mkdir -p ...` 在 PowerShell 5.1 报语法错（`&&` / `-p` 不被支持）。
 - **根因**：用户终端默认 PowerShell，而项目命令是 bash 语法。
 - **1.0 建议**：README / 贡献指南明确「项目命令统一用 Git Bash」；Makefile 已覆盖 `install/run/test/lint`，引导用户走 `make`。
+
+### 21. v0.5 鉴权缺头返回 422 而非 401
+- **现象**：`GET /api/tasks/x` 不带 `X-API-Key` → `422 {"detail":[{"type":"missing","loc":["header","X-API-Key"]...}]}`，用户预期 401。
+- **根因**：`server.py:23` `require_api_key` 用 `Header(alias="X-API-Key")`，缺头时 FastAPI 当参数校验失败自动返 422；仅「头存在但值错」才 `raise HTTPException(401)`（`server.py:24-25`）。
+- **当前处置**：鉴权生效（请求被拒），仅状态码语义不符直觉。
+- **1.0 建议**：用自定义 `APIKeyHeader` 或在依赖里显式判缺头返 401，使「缺头 / 错头」均 401，符合 REST 惯例。
+
+### 24. 交付物无验证关卡（coder 自认「未经实跑」）
+- **现象**：`turn-20260908-214210-40bcda` 端到端跑通——中文输入 → 通用 Agent 正确 dispatch → coder 在 `workspace/pomodoro/` 生成 `pomodoro.py` + `tests/test_pomodoro.py` + `pyproject.toml` + `README.md`。但 coder 在 `final` 明确声明「环境无代码执行工具，代码**未经实跑验证**（未附运行输出）」，仅配套了单元测试。
+- **根因**：dispatch 管线只有「生成」没有「验收」步骤；coder 工具集（`write_file` 等）无运行能力（同 #10）。本例 coder 已**诚实声明未验证**（比早期编造假日志好），但框架仍会把未验证代码当「完成」交付，质量无把关。
+- **当前处置**：链路功能验证通过（调度/中文/文件产出均正常）；交付质量靠用户手动跑 `uv run ... start/status/stats` 复核。
+- **1.0 建议**：在 dispatch 收尾加「沙箱自验」步骤——coder 写完先 `run_cmd`（白名单+超时，见 #10）实跑冒烟用例，通过才发 `final`；或加独立 verifier Agent 对交付物做 lint+基础跑测。把「未验证」从「用户事后发现」提前成「交付前拦截」。
 
 ---
 
@@ -118,6 +142,18 @@
 4. **改 `create_app_agent` 必同步 `general.build_general_agent` 签名与工具合并**。
 5. **改名 / 合并包先 lint**，防止 `__init__.py` 残留拼接与缩进整段丢失。
 6. **项目命令统一 Git Bash**，避免 PowerShell 的 `&&` / `mkdir -p` 语法坑。
+
+### 22. 测试用 PowerShell `Invoke-RestMethod` 需 `-UseBasicParsing`
+- **现象**：`Invoke-RestMethod GET /api/chat/turns/{id}` 抛 `NullReferenceException`（FullyQualifiedErrorId: `System.NullReferenceException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand`），无 HTTP 状态码，看似「服务器没返回」。
+- **根因**：PowerShell 5.1 的 `Invoke-RestMethod` 默认走 IE 解析引擎（MSHTML），现代 Windows 上直接 NRE；与服务器无关（同接口 curl 正常）。
+- **当前处置**：改用 `curl.exe` 或加 `-UseBasicParsing`。
+- **1.0 建议**：API 冒烟测试统一用 `curl.exe`（`-N` 看 SSE）；若用 PS，固定 `-UseBasicParsing`。README 测试段注明。
+
+### 23. 测试：PowerShell 内 curl `-d` 内联 JSON 被原生参数传递弄坏
+- **现象**：`curl.exe -d '{"message":"中文"}'`（PS 单引号内联）仍报 `422 json_invalid`；改用 `-d "@body.json"`（文件）则正常返回 turn_id。
+- **根因**：PowerShell 向原生 exe（curl.exe）传递含 `"` 的参数时会自行加引号 / 转义，内联 JSON 的引号被弄坏；文件方式绕开命令行参数传递。
+- **当前处置**：JSON body 一律写文件 + `-d @file.json`（如 `'...' | Out-File -Encoding utf8 body.json`）。
+- **1.0 建议**：API 冒烟测试脚本统一用 `@file.json` 传 body，避免 PS 内联引号陷阱（与 #22 同属「测试客户端坑」）。
 
 ---
 

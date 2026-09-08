@@ -1,234 +1,141 @@
-"""pomodoro.py 纯逻辑单元测试（pytest，仅测试依赖）。
+"""pomodoro.py 纯逻辑单元测试（无需真实计时/IO，仅依赖 pytest）。"""
 
-覆盖点：
-- 暂停/继续状态机的纯逻辑推算（compute_pause_state / compute_resume_state）
-- 剩余时间推算（compute_remaining）
-- 崩溃残留判定（is_state_stale）与 load_state 自动清理（使用 tmp_path 隔离）
-- complete_session 的记录构建（build_session_record，含 tag 与旧数据兼容）
-- stats 聚合（aggregate_stats，含按标签统计与旧数据无 tag 字段兼容）
-
-测试均通过 monkeypatch 将数据/状态文件指向 tmp_path，不污染真实数据文件。
-"""
-
-import json
-import sys
 from datetime import datetime, timedelta
-from pathlib import Path
 
-import pytest
-
-# 使 pomodoro 模块所在目录（tests 的上一级）可被导入
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-import pomodoro  # noqa: E402
-
-NOW = datetime(2024, 1, 15, 10, 0, 0)
+import pomodoro as app
 
 
-# ==================== 夹具 ====================
-@pytest.fixture
-def running_state():
-    """一个"已运行 60 秒"的工作番茄钟运行态"""
-    start = NOW - timedelta(seconds=60)
-    return {
-        "status": "running",
-        "mode": "work",
-        "start_time": start.isoformat(),
-        "elapsed_seconds": 0,
-        "target_seconds": 25 * 60,
-        "tag": "写周报",
-    }
+def t(now: datetime, seconds_ago: float) -> datetime:
+    return now - timedelta(seconds=seconds_ago)
 
 
-# ==================== compute_remaining ====================
-def test_compute_remaining_running(running_state):
-    now = datetime.fromisoformat(running_state["start_time"]) + timedelta(seconds=100)
-    assert pomodoro.compute_remaining(running_state, now) == pytest.approx(25 * 60 - 100)
+def make_running(now: datetime, minutes=25, elapsed_before=0.0, seconds_running=0.0):
+    """构造一个 running 状态：已专注 elapsed_before 秒，且本运行段已跑 seconds_running 秒。"""
+    data = app.new_data()
+    s = data["state"]
+    s["status"] = app.RUNNING
+    s["duration_minutes"] = minutes
+    s["started_at"] = app.to_iso(t(now, elapsed_before + seconds_running))
+    s["running_from"] = app.to_iso(t(now, seconds_running))
+    s["elapsed_seconds"] = elapsed_before
+    return data
 
 
-def test_compute_remaining_paused():
-    paused = {
-        "status": "paused",
-        "mode": "work",
-        "start_time": None,
-        "elapsed_seconds": 120,
-        "target_seconds": 25 * 60,
-        "tag": None,
-    }
-    assert pomodoro.compute_remaining(paused, NOW) == pytest.approx(25 * 60 - 120)
+# ---------------- 剩余时间推算 ----------------
+def test_compute_remaining_running():
+    now = datetime.now().astimezone()
+    data = make_running(now, minutes=25, seconds_running=300)  # 已专注 300s
+    info = app.compute_info(data, now)
+    assert info["dur"] == 1500
+    assert abs(info["elapsed"] - 300) < 0.001
+    assert abs(info["remaining"] - 1200) < 0.001
+    assert info["complete"] is False
 
 
-# ==================== 暂停/继续状态机 ====================
-def test_compute_pause_state(running_state):
-    now = datetime.fromisoformat(running_state["start_time"]) + timedelta(seconds=90)
-    paused = pomodoro.compute_pause_state(running_state, now)
-    assert paused["status"] == "paused"
-    assert paused["start_time"] is None
-    assert paused["elapsed_seconds"] == pytest.approx(90)
-    assert paused["mode"] == "work"
-    assert paused["tag"] == "写周报"  # 标签跨暂停保留
+def test_compute_complete_when_overdue():
+    now = datetime.now().astimezone()
+    data = make_running(now, minutes=25, seconds_running=1600)  # 超时 100s
+    info = app.compute_info(data, now)
+    assert info["complete"] is True
+    assert info["remaining"] == 0.0
+    assert info["elapsed"] == 1500  # 封顶在计划时长
 
 
-def test_compute_resume_state():
-    paused = {
-        "status": "paused",
-        "mode": "work",
-        "start_time": None,
-        "elapsed_seconds": 90,
-        "target_seconds": 25 * 60,
-        "tag": "写周报",
-    }
-    resumed = pomodoro.compute_resume_state(paused, NOW)
-    assert resumed["status"] == "running"
-    assert resumed["start_time"] == NOW.isoformat()
-    assert resumed["elapsed_seconds"] == 90  # 已累计秒数保留
-    assert resumed["tag"] == "写周报"
+def test_ensure_completed_logs_history():
+    now = datetime.now().astimezone()
+    data = make_running(now, minutes=25, seconds_running=1600)
+    changed, entry = app.ensure_completed(data, now)
+    assert changed is True
+    assert entry["completed"] is True
+    assert entry["focus_seconds"] == 1500
+    assert data["state"]["status"] == app.IDLE
+    assert len(data["history"]) == 1
 
 
-# ==================== 崩溃残留判定 ====================
-def test_is_state_stale():
-    base = {
-        "status": "running",
-        "mode": "work",
-        "elapsed_seconds": 0,
-        "target_seconds": 25 * 60,
-        "tag": None,
-    }
-    # 早已远超目标时长（2 小时前开始）→ 残留
-    stale = dict(base, start_time=(NOW - timedelta(hours=2)).isoformat())
-    assert pomodoro.is_state_stale(stale, NOW) is True
-
-    # 刚启动不久 → 正常
-    fresh = dict(base, start_time=(NOW - timedelta(seconds=5)).isoformat())
-    assert pomodoro.is_state_stale(fresh, NOW) is False
-
-    # 超过 target + 60 缓冲 → 残留
-    borderline = dict(base, start_time=(NOW - timedelta(seconds=25 * 60 + 120)).isoformat())
-    assert pomodoro.is_state_stale(borderline, NOW) is True
-
-    # 非 running → 不判定为残留
-    paused = dict(base, status="paused", start_time=None)
-    assert pomodoro.is_state_stale(paused, NOW) is False
-
-    # start_time 缺失或无法解析 → 残留
-    assert pomodoro.is_state_stale(dict(base, start_time=None), NOW) is True
-    assert pomodoro.is_state_stale(dict(base, start_time="bad-time"), NOW) is True
+# ---------------- start / pause / resume / reset ----------------
+def test_start_rejects_when_active():
+    now = datetime.now().astimezone()
+    data = make_running(now, minutes=25, seconds_running=10)
+    ok, changed, _ = app.start_pomodoro(data, 25)
+    assert ok is False and changed is False  # 已有进行中，拒绝覆盖
+    assert data["state"]["status"] == app.RUNNING
 
 
-def test_load_state_cleans_stale_running(tmp_path, monkeypatch, capsys):
-    state_file = tmp_path / "pomodoro_state.json"
-    monkeypatch.setattr(pomodoro, "STATE_FILE", state_file)
-    monkeypatch.setattr(pomodoro, "DATA_FILE", tmp_path / "pomodoro_data.json")
+def test_pause_then_resume_keeps_time():
+    now = datetime.now().astimezone()
+    data = make_running(now, minutes=25, seconds_running=120)  # 已专注 2 分钟
+    ok, changed, _ = app.pause_pomodoro(data, now)
+    assert ok and changed
+    s = data["state"]
+    assert s["status"] == app.PAUSED
+    assert abs(s["elapsed_seconds"] - 120) <= 1  # 暂停时把 120s 固化下来
 
-    stale = {
-        "status": "running",
-        "mode": "work",
-        "start_time": (datetime.now() - timedelta(hours=2)).isoformat(),
-        "elapsed_seconds": 0,
-        "target_seconds": 25 * 60,
-        "tag": None,
-    }
-    state_file.write_text(json.dumps(stale), encoding="utf-8")
+    # 暂停中时间流逝不计入（now 已前进 10 分钟）
+    later = now + timedelta(minutes=10)
+    ok, changed, _ = app.resume_pomodoro(data, later)
+    assert ok and changed
+    assert data["state"]["status"] == app.RUNNING
 
-    state = pomodoro.load_state()
-    assert state["status"] == "idle"
-    assert not state_file.exists()  # 残留状态文件已被清理
-    assert "自动清理" in capsys.readouterr().out
-
-
-def test_load_state_keeps_fresh_running(tmp_path, monkeypatch):
-    state_file = tmp_path / "pomodoro_state.json"
-    monkeypatch.setattr(pomodoro, "STATE_FILE", state_file)
-    monkeypatch.setattr(pomodoro, "DATA_FILE", tmp_path / "pomodoro_data.json")
-
-    fresh = {
-        "status": "running",
-        "mode": "work",
-        "start_time": (datetime.now() - timedelta(seconds=5)).isoformat(),
-        "elapsed_seconds": 0,
-        "target_seconds": 25 * 60,
-        "tag": "写周报",
-    }
-    state_file.write_text(json.dumps(fresh), encoding="utf-8")
-
-    state = pomodoro.load_state()
-    assert state["status"] == "running"
-    assert state_file.exists()
-    assert state["tag"] == "写周报"
+    # 恢复后再跑 60s：剩余应为 1500-120-60 = 1320
+    info = app.compute_info(data, later + timedelta(seconds=60))
+    assert abs(info["remaining"] - 1320) < 1.0
 
 
-# ==================== 会话记录构建（tag + 旧数据兼容） ====================
-def test_build_session_record_with_tag():
-    state = {
-        "status": "running",
-        "mode": "work",
-        "start_time": (NOW - timedelta(minutes=25)).isoformat(),
-        "elapsed_seconds": 0,
-        "target_seconds": 25 * 60,
-        "tag": "写周报",
-    }
-    rec = pomodoro.build_session_record(state, NOW)
-    assert rec["date"] == "2024-01-15"
-    assert rec["start_time"] == "09:35:00"
-    assert rec["end_time"] == "10:00:00"
-    assert rec["duration_minutes"] == 25
-    assert rec["completed"] is True
-    assert rec["mode"] == "work"
-    assert rec["tag"] == "写周报"
+def test_reset_records_aborted():
+    now = datetime.now().astimezone()
+    data = make_running(now, minutes=25, seconds_running=90)
+    ok, changed, _ = app.reset_pomodoro(data, now)
+    assert ok and changed
+    assert data["state"]["status"] == app.IDLE
+    assert len(data["history"]) == 1
+    assert data["history"][0]["completed"] is False
+    assert abs(data["history"][0]["focus_seconds"] - 90) <= 1
 
 
-def test_build_session_record_without_tag():
-    state = {
-        "status": "running",
-        "mode": "work",
-        "start_time": (NOW - timedelta(minutes=25)).isoformat(),
-        "elapsed_seconds": 0,
-        "target_seconds": 25 * 60,
-        "tag": None,
-    }
-    rec = pomodoro.build_session_record(state, NOW)
-    assert "tag" not in rec  # 无标签时不写 tag 字段，与旧数据结构一致
-
-
-# ==================== stats 聚合 ====================
-def test_aggregate_stats_with_tags_and_legacy():
-    sessions = [
-        # 带标签的工作番茄钟 ×2
-        {"date": "2024-01-15", "start_time": "09:00", "end_time": "09:25",
-         "duration_minutes": 25, "completed": True, "mode": "work", "tag": "写周报"},
-        {"date": "2024-01-15", "start_time": "09:30", "end_time": "09:55",
-         "duration_minutes": 25, "completed": True, "mode": "work", "tag": "写周报"},
-        # 旧数据：无 tag 字段的工作番茄钟（不得报错，也不计入标签统计）
-        {"date": "2024-01-15", "start_time": "10:00", "end_time": "10:25",
-         "duration_minutes": 25, "completed": True, "mode": "work"},
-        # 带标签的休息番茄钟
-        {"date": "2024-01-15", "start_time": "10:30", "end_time": "10:35",
-         "duration_minutes": 5, "completed": True, "mode": "break", "tag": "午休"},
-        # 另一日期，不应计入当日统计
-        {"date": "2024-01-16", "start_time": "09:00", "end_time": "09:25",
-         "duration_minutes": 25, "completed": True, "mode": "work", "tag": "写周报"},
-        # 未完成记录不计入
-        {"date": "2024-01-15", "start_time": "11:00", "end_time": "11:10",
-         "duration_minutes": 10, "completed": False, "mode": "work", "tag": "摸鱼"},
+# ---------------- stats 聚合 ----------------
+def test_stats_today():
+    now = datetime.now().astimezone()
+    data = app.new_data()
+    data["history"] = [
+        {"completed": True, "planned_minutes": 25, "focus_seconds": 1500,
+         "started_at": app.to_iso(now), "ended_at": app.to_iso(now), "label": ""},
+        {"completed": True, "planned_minutes": 25, "focus_seconds": 1500,
+         "started_at": app.to_iso(now), "ended_at": app.to_iso(now), "label": "写周报"},
+        {"completed": False, "planned_minutes": 25, "focus_seconds": 600,
+         "started_at": app.to_iso(now), "ended_at": app.to_iso(now), "label": ""},
     ]
-
-    stats = pomodoro.aggregate_stats(sessions, "2024-01-15")
-    assert stats["work_count"] == 3
-    assert stats["break_count"] == 1
-    assert stats["total_work_minutes"] == 75
-    assert stats["total_break_minutes"] == 5
-    # 无标签的旧记录不计入标签统计；完成数只算 completed
-    assert stats["tag_summary"] == {
-        "写周报": {"count": 2, "minutes": 50},
-    }
-    assert len(stats["completed_sessions"]) == 4
+    lines = app.stats_text(data, scope="today", now=now)
+    text = "\n".join(lines)
+    assert "完成番茄钟：2 个" in text
+    assert "累计专注：50m" in text      # 2 × 25 分钟
+    assert "中途放弃：1 个" in text
+    assert "写周报" in text
 
 
-def test_aggregate_stats_empty_day():
-    stats = pomodoro.aggregate_stats([], "2024-01-15")
-    assert stats["work_count"] == 0
-    assert stats["total_work_minutes"] == 0
-    assert stats["tag_summary"] == {}
-    assert stats["completed_sessions"] == []
+# ---------------- 持久化容错 ----------------
+def test_store_load_corrupt_file_quarantines(tmp_path):
+    f = tmp_path / "pomodoro.json"
+    f.write_text("{ 这不是合法 JSON", encoding="utf-8")
+    store = app.Store(str(f))
+    data = store.load()
+    assert data == app.new_data()
+    # 损坏文件被改名备份，而不是覆盖
+    corrupts = list(tmp_path.glob("*.corrupt-*"))
+    assert len(corrupts) == 1
+
+
+def test_store_roundtrip(tmp_path):
+    f = tmp_path / "pomodoro.json"
+    store = app.Store(str(f))
+    data = app.new_data()
+    data["history"].append({"completed": True})
+    store.save(data)
+    assert store.load() == data
+
+
+def test_normalize_state_repairs_missing_fields():
+    state = {"status": "running"}  # 缺一堆字段
+    app.normalize_state(state)
+    assert state["status"] == app.IDLE  # 无开始时间的孤儿 running -> idle
+    assert state["duration_minutes"] == app.DEFAULT_MINUTES
+    assert state["elapsed_seconds"] == 0.0

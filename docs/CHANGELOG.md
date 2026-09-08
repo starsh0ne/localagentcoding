@@ -45,3 +45,21 @@
 - workspace_files工厂化: coder绑任务子目录, 通用全局只读
 ### 已知债务
 - SQLite单写者, 多线程未处理(→v0.5 API并发); 长期记忆仅精确去重(语义去重→后续)
+
+## v0.5.0 — API服务化(鉴权+串行队列+SSE)
+### 新增
+- api/bus.py: 事件总线(线程安全发布/回放缓冲/TTL清理)
+- api/worker.py: 单worker串行队列 + Turn注册表(提交/消费分离)
+- api/server.py: chat提交/turn与task双SSE流/history/轮询兜底
+- 鉴权: X-API-Key, fail-closed(空key拒启), /health豁免
+### 变更
+- agents/base.py: handoff改stream, coder内部动作实时推task话题
+- tools/task_tools.py: update_progress发布progress/task_done事件
+- memory/store.py + tasks/store.py: 线程安全修复(清偿v0.4债务)
+### 设计决策
+- 提交/消费分离: 长任务不挂HTTP请求, POST返回turn_id, SSE消费
+- task SSE: DB为进度事实源, 先订阅后读库按pid去重
+### 已知债务
+- 并行coder需每任务独立venv; turn注册表内存态(重启丢, history兜底);
+  浏览器EventSource无法带自定义头(未来Web端需token URL或cookie方案);
+  公网暴露需加HTTPS反代(→v1.0); 无CORS(未来Web端补)
