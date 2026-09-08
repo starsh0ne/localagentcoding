@@ -1,0 +1,19 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+
+# ===== 密钥（请勿提交） =====
+.env
+
+# ===== IDE =====
+.idea/
+.vscode/
+
+# ===== 工具/助手本地状态 =====
+.workbuddy/
