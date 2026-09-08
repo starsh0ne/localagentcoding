@@ -6,5 +6,5 @@
 
 # TODO(v0.8): 实现可观测性
 #   - 配置 LangChain 回调 (LangSmithTracer / OpenTelemetryCallbackHandler)
-#   - 定义采集点：agent 调用、tool 调用、retriever 调用
+#   - 定义采集点：agents 调用、tool 调用、retriever 调用
 #   - 暴露 get_tracer() 供各模块在 create_agent 时挂载 callbacks

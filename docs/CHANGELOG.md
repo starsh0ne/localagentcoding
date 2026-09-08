@@ -1,32 +1,16 @@
-# Changelog
-
-## [0.1.0] - 最小 Agent
-- 新增 `main.py` 最小可用 Agent（薄入口原型的起点）。
-
-## [0.2.0] - 工程化骨架
-- 新增 `pyproject.toml`、`.env.example`、`Makefile`，建立项目工程化基础。
-- 新增 `src/agent_pro/config.py`：配置集中管理（pydantic-settings + .env）。
-- 新增 `src/agent_pro/agent/core.py`：提供 `create_agent` 主装配入口；
-  `main.py` 退役为薄入口。
-- 新增 `src/agent_pro/agent/prompts.py`：系统提示词集中管理。
-
-## [0.3.0] - 工具系统
-- 新增 `src/agent_pro/tools/registry.py`：工具注册中心。
-- 新增 `src/agent_pro/tools/errors.py`：工具调用错误分类处理。
-
-## [0.4.0] - 会话记忆
-- 新增 `src/agent_pro/memory/session.py`：会话管理与历史压缩。
-
-## [0.5.0] - RAG
-- 新增 `src/agent_pro/rag/ingest.py`：文档摄取与入库。
-- 新增 `src/agent_pro/rag/retrieve.py`：检索与上下文拼接。
-
-## [0.6.0] - 评估
-- 新增 `src/agent_pro/eval/runner.py`：评估运行器。
-- 新增 `tests/`：测试目录。
-
-## [0.7.0] - API 服务
-- 新增 `src/agent_pro/api/server.py`：FastAPI 服务暴露 Agent。
-
-## [0.8.0] - 可观测性
-- 新增 `src/agent_pro/observability/tracing.py`：链路追踪与埋点。
+	# Changelog
+	## v0.2.0 — 工程化骨架 + 多Agent调度架构
+	### 新增
+	- src/包结构、config.py（Pydantic Settings + 统一模型构造）
+	- agents/base.py：AgentSpec + AgentRegistry 调度接口
+	- agents/coder.py：Coder骨架；agents/general.py：意图识别+调度中枢
+	- pyproject.toml / .env.example / Makefile / CHANGELOG
+	### 变更
+	- main.py 瘦身为薄CLI入口；v0.1工具迁入 tools/builtin.py
+	### 设计决策
+	- 调度采用 Agent-as-Tool 模式（弃前置分类路由，理由：可扩展/可连续调度）
+	- 子Agent不持有调度工具，两级扁平防死循环
+	### 已知债务
+	- calculator eval注入（→v0.3沙箱）；会话无持久化无压缩（→v0.4）
+	## v0.1.0 — 最小智能体循环
+	- 单文件：LLM + 2工具 + 裸循环

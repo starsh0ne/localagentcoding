@@ -5,7 +5,7 @@
 """
 
 # TODO(v0.6): 实现评估运行器
-#   def run_eval(dataset_path, agent) -> EvalReport:
+#   def run_eval(dataset_path, agents) -> EvalReport:
 #     - 加载用例（问题 / 期望 / 评分标准）
-#     - 逐条调用 create_agent 产出的 agent
+#     - 逐条调用 create_agent 产出的 agents
 #     - 聚合指标（准确率、延迟、成本、引用命中）

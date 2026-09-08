@@ -1,7 +1,7 @@
 """检索与上下文拼接 (v0.5)
 
 封装 retriever：按查询召回相关片段，并将结果格式化为可注入提示词的
-上下文，供 agent.core.create_agent 在回答时引用（含来源标记，利于评估）。
+上下文，供 agents.core.create_agent 在回答时引用（含来源标记，利于评估）。
 """
 
 # TODO(v0.5): 实现检索

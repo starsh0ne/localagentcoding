@@ -9,7 +9,7 @@ RAG (rag/retrieve.py, v0.5) 等按配置组装为一个可执行 Agent。
 
 # TODO(v0.2): 实现 create_agent(settings) -> Runnable/ AgentExecutor
 #   - 加载 LLM（langchain_openai.ChatOpenAI）
-#   - 加载系统提示词（agent.prompts）
+#   - 加载系统提示词（agents.prompts）
 #   - 注册工具（tools.registry, v0.3）
 #   - 挂载记忆（memory.session, v0.4）
 #   - 注入 RAG retriever（rag.retrieve, v0.5）
