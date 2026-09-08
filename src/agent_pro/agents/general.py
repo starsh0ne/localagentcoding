@@ -22,9 +22,12 @@ GENERAL_SYSTEM_PROMPT = """你是通用助理，同时是多Agent系统的调度
 """
 
 
-def build_general_agent(registry: AgentRegistry):
+def build_general_agent(registry: AgentRegistry, extra_tools: list | None = None):
+    tools = [get_current_time, calculator, *registry.as_handoff_tools()]
+    if extra_tools:
+        tools.extend(extra_tools)
     return create_agent(
         build_model(),
-        tools=[get_current_time, calculator, *registry.as_handoff_tools()],
+        tools=tools,
         system_prompt=GENERAL_SYSTEM_PROMPT,
     )

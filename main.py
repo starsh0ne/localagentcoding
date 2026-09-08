@@ -1,47 +1,54 @@
 # ============================================================
-# main.py | v0.1诞生 → v0.2薄CLI → v0.3流式进度(长任务可视化)
-# 变更: invoke → stream(updates)，工具调用实时可见
-# 已知债务: ① 历史无限增长无压缩 → v0.4
-#           ② 会话无持久化 → v0.4
-#           ③ 嵌套子Agent内部进度不可见(只见dispatch整体) → v0.7观测性
+# main.py | v0.1诞生 → v0.3流式 → v0.4会话持久化接入
+# 变更: 裸history → SessionManager(DB重建+压缩+偏好注入)
+#       上下文每轮从DB重建 → 与v0.5 API无状态形态提前对齐
+# 用法: uv run main.py --new | --session <id>
 # ============================================================
+import argparse
+from datetime import datetime
 from agent_pro.agents import create_app_agent
+from agent_pro.memory.manager import SessionManager
 
 
 def _print_progress(msg) -> None:
-    """流式打印工具执行进度——长任务不再无声等待"""
     for tc in getattr(msg, "tool_calls", None) or []:
         brief = str(tc.get("args", ""))[:70].replace("\n", " ")
         print(f"    ⚙ {tc.get('name')}({brief}…)")
         if str(tc.get("name", "")).startswith("dispatch_to_"):
             print("    ⏳ 专家执行中（长任务，可能需要数分钟）…")
-    if getattr(msg, "type", "") == "tool":
-        brief = str(msg.content)[:70].replace("\n", " ")
-        print(f"    ✔ {msg.name}: {brief}")
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--session", default="default", help="会话ID(续聊)")
+    ap.add_argument("--new", action="store_true", help="开启新会话")
+    args = ap.parse_args()
+    sid = f"s-{datetime.now():%Y%m%d-%H%M%S}" if args.new else args.session
+    session = SessionManager(sid)
     agent = create_app_agent()
-    history = []
-    print("Agent Pro v0.3（Coder工作区模式）— 输入 exit 退出")
+    print(f"Agent Pro v0.4（记忆+任务系统）会话: {sid} — 输入exit退出")
     while True:
         user_input = input("\n你: ").strip()
         if user_input.lower() in ("exit", "quit"):
             break
-        history.append({"role": "user", "content": user_input})
-        new_msgs = []
-        # updates模式: 每完成一个节点(模型/工具)即产出增量
-        for update in agent.stream({"messages": history}, stream_mode="updates"):
+        if not user_input:
+            continue
+        session.append_user(user_input)
+        messages = session.build_messages()  # 每轮从DB重建: 摘要+偏好+最近5轮
+        final = None
+        for update in agent.stream({"messages": messages}, stream_mode="updates"):
             for payload in update.values():
                 chunk = payload.get("messages", []) if isinstance(payload, dict) else []
                 if not isinstance(chunk, list):
                     chunk = [chunk]
                 for m in chunk:
-                    new_msgs.append(m)
                     _print_progress(m)
-        history.extend(new_msgs)  # 回填完整轨迹
-        if new_msgs:
-            print(f"\nAgent: {new_msgs[-1].content}")
+                    if getattr(m, "type", "") == "ai":
+                        final = m
+        text = str(final.content) if final else "(无输出)"
+        session.append_assistant(text)
+        session.maybe_compact()  # 攒满10轮触发: 压缩+价值提取+过期删除
+        print(f"\nAgent: {text}")
 
 
 if __name__ == "__main__":

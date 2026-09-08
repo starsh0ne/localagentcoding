@@ -1,17 +1,19 @@
 # ============================================================
-# agents/__init__.py | v0.2 诞生（组装根）
-# 新增子Agent两步: 写Spec → 在此注册一行
+# agents/__init__.py | v0.2诞生 → v0.4(接线任务系统+只读验收工具)
 # ============================================================
-from agent_pro.agents.base import AgentRegistry, AgentSpec  # noqa: F401
+from agent_pro.agents.base import AgentRegistry, AgentSpec, TaskContext  # noqa: F401
 from agent_pro.agents.coder import CODER_SPEC
 from agent_pro.agents.general import build_general_agent
+from agent_pro.config import get_settings
+from agent_pro.tasks.store import get_task_store
+from agent_pro.tools.workspace_files import make_workspace_tools
 
 
 def create_app_agent():
-    """组装入口：注册中心 + 通用Agent"""
-    registry = AgentRegistry()
+    settings = get_settings()
+    task_store = get_task_store()
+    registry = AgentRegistry(context_resolver=task_store.resolve_task_context)
     registry.register(CODER_SPEC)
-    # 未来扩展示例（两行接入一个新专家）:
-    # from agent_pro.agents.search import SEARCH_SPEC
-    # registry.register(SEARCH_SPEC)
-    return build_general_agent(registry)
+    # 通用agent: 全局工作区只读工具(验收用, 无写入/删除/安装权)
+    readonly_tools = make_workspace_tools(settings.workspace_dir, include_write=False)
+    return build_general_agent(registry, extra_tools=readonly_tools)

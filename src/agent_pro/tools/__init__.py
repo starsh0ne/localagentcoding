@@ -5,18 +5,8 @@
 # ============================================================
 from agent_pro.tools.builtin import calculator, get_current_time
 from agent_pro.tools.env_tools import pip_install
-from agent_pro.tools.workspace_files import (
-    delete_file,
-    list_workspace,
-    read_file,
-    write_file,
-)
-# 通用Agent基础工具
+from agent_pro.tools.workspace_files import make_workspace_tools
+
 BUILTIN_TOOLS = [get_current_time, calculator]
-# Coder专家工具（工作区文件 + 依赖安装）
-CODER_TOOLS = [list_workspace, read_file, write_file, delete_file, pip_install]
-__all__ = [
-    "get_current_time", "calculator", "pip_install",
-    "list_workspace", "read_file", "write_file", "delete_file",
-    "BUILTIN_TOOLS", "CODER_TOOLS",
-]
+__all__ = ["get_current_time", "calculator", "pip_install",
+           "make_workspace_tools", "BUILTIN_TOOLS"]

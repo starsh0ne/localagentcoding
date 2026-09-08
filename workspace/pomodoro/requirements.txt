@@ -1,0 +1,4 @@
+# 说明：pomodoro.py 纯标准库、零第三方依赖。
+# 本文件无实际用途、可删除。
+# 直接运行：python pomodoro.py  （或 uv run pomodoro.py）
+# 运行测试需安装 pytest（仅测试依赖），见 pyproject.toml 的 dev 依赖组。

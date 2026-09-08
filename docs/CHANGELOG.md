@@ -30,3 +30,18 @@
 - 轻量工具集注册（BUILTIN_TOOLS/CODER_TOOLS），完整权限注册延至v0.8
 ### 已知债务
 - 嵌套子Agent进度不可见（→v0.7）；多任务共享workspace无隔离（→v0.4决策）
+
+## v0.4.0 — 记忆系统 + 任务共享状态 + 缺陷修复
+### 缺陷修复(用户实测发现, 固化为铁律)
+- handoff工具描述为空: f-string docstring不是docstring(非字符串字面量)，
+  动态描述必须走@tool(description=...)参数
+- 单文件完整应用未调度: "多文件"字样误导判据；判据重写为三维量化
+  (交付形态完整度/技术跨度/明确指令)，且判据唯一来源=工具描述
+### 新增
+- memory/: SessionManager(5轮短期+每5轮压缩+摘要滚动+价值提取入库)
+  MemoryDB(会话/消息/摘要/preference|fact|entity分库/FTS5+可选向量)
+- tasks/: TaskStore共享状态(计划书/进度/任务子目录)
+- tools/task_tools.py: 通用侧create/update计划书+进度+验收; coder侧读计划+报进度
+- workspace_files工厂化: coder绑任务子目录, 通用全局只读
+### 已知债务
+- SQLite单写者, 多线程未处理(→v0.5 API并发); 长期记忆仅精确去重(语义去重→后续)

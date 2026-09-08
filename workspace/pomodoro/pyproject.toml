@@ -1,0 +1,15 @@
+[project]
+name = "pomodoro-cli"
+version = "1.1.0"
+description = "番茄钟CLI应用（支持任务标签）- 提高工作效率的好帮手"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+pomodoro = "pomodoro:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
