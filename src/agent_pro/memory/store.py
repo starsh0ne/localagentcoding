@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from agent_pro.config import get_settings
+from agent_pro.embeddings import cosine, get_embedder
+
 
 KINDS = ("preference", "fact", "entity")
 _embedder = None  # None=未初始化 / False=禁用
@@ -20,26 +22,6 @@ _embedder = None  # None=未初始化 / False=禁用
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-
-def _get_embedder():
-    global _embedder
-    if _embedder is None:
-        s = get_settings()
-        if not s.embedding_model:
-            _embedder = False
-        else:
-            from langchain_openai import OpenAIEmbeddings
-            _embedder = OpenAIEmbeddings(
-                model=s.embedding_model,
-                api_key=s.embedding_api_key or s.api_key,
-                base_url=s.embedding_base_url)
-    return _embedder
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na, nb = math.sqrt(sum(x * x for x in a)), math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na > 0 and nb > 0 else 0.0
 
 
 class MemoryDB:

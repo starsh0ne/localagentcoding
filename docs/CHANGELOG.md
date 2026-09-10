@@ -63,3 +63,20 @@
 - 并行coder需每任务独立venv; turn注册表内存态(重启丢, history兜底);
   浏览器EventSource无法带自定义头(未来Web端需token URL或cookie方案);
   公网暴露需加HTTPS反代(→v1.0); 无CORS(未来Web端补)
+
+## v0.6.0 — 私有知识库(RAG)
+### 新增
+- kb/parsers.py: 解析器注册表(md/markdown/txt; 围栏内#不误判)
+- kb/chunking.py: 结构感知分块(标题路径溯源/小节合并/超长硬切+重叠)
+- kb/store.py: kb.db + RRF混合检索(向量+FTS5, 未配置embedding自动降级)
+- kb/ingest.py + __main__: import/reindex/stats/search CLI
+- tools/knowledge_tools.py: search_knowledge工具(判据全在描述, 铁律)
+- embeddings.py: 自memory/store.py提取共享
+### 变更
+- general.py/coder.py: 挂载search_knowledge + 工作流各一条
+### 设计决策
+- 独立kb.db(rebuild不伤会话数据); import按source幂等替换
+- 溯源: 块自带source+heading_path, 检索结果带引用返回
+### 已知债务
+- doc/docx/xlsx/csv/PDF解析器(注册表已就位, 加函数即扩);
+  目录监听增量更新(用户决策: 后续版本); 内存余弦仅自用规模适用

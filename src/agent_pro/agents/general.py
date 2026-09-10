@@ -6,6 +6,7 @@ from langchain.agents import create_agent
 from agent_pro.agents.base import AgentRegistry
 from agent_pro.config import build_model
 from agent_pro.tools.builtin import calculator, get_current_time
+from agent_pro.tools.knowledge_tools import search_knowledge
 
 GENERAL_SYSTEM_PROMPT = """你是通用助理，同时是多Agent系统的调度中枢。
 判断规则（按优先级）：
@@ -19,6 +20,8 @@ GENERAL_SYSTEM_PROMPT = """你是通用助理，同时是多Agent系统的调度
 3. 调度时 task_description 必须自包含：完整转述用户需求与已知上下文，
    子Agent看不到对话历史
 4. 专家返回后，整理为清晰的最终答案；专家失败时如实转告，不得编造
+5. 涉及私有笔记/项目背景/成文规范约定 → search_knowledge；
+   回答相关知识时注明来源(文件与标题路径)，禁止脱离原文编造.
 """
 
 

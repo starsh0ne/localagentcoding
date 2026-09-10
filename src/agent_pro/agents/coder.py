@@ -18,7 +18,7 @@ from agent_pro.api.bus import get_event_bus
 from agent_pro.config import build_model, get_settings
 from agent_pro.tools.env_tools import pip_install
 from agent_pro.tools.workspace_files import make_workspace_tools
-
+from agent_pro.tools.knowledge_tools import search_knowledge
 
 @dataclass(frozen=True)
 class TaskContext:
@@ -125,6 +125,7 @@ CODER_SYSTEM_PROMPT = """你是 coder 专家Agent，负责在工作区生成真�
 4. 交付时简要说明文件结构与运行方式；除非已真实运行验证，
    否则不要附"运行示例"输出，避免编造未验证的结果。
 5. 任务描述已自包含（含目标、约束、已知信息），直接执行即可。
+
 """
 
 

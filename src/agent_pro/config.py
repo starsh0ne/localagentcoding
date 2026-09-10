@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"  # 局域网测试设 0.0.0.0
     api_port: int = 8000
     api_auth_key: str = ""  # 留空时API拒绝启动，CLI不受影响
+    # v0.6: 私有知识库文档目录(导入扫描根)
+    kb_dir: Path = Path("./knowledge")
 
 
 @lru_cache

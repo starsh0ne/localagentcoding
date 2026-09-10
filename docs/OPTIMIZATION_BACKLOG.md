@@ -161,3 +161,33 @@
 - 已提交：`v0.1`（minimal agent loop）、`v0.2`（工程骨架 + 多 Agent 调度）、`v0.3`（coder workspace + sandbox + 长任务处理）。
 - 演进中（未单独提交）：`v0.4`（记忆 + 任务系统）、`v0.5`（RAG）、`v0.6`（eval）、`v0.7`（API）、`v0.8`（可观测性）占位与部分实现已就位。
 - 详见 `docs/CHANGELOG.md`。
+
+---
+
+## 五、本轮已收口（v0.6 收尾，已做）
+
+### 25. 生成产物/数据误提交风险（已补 .gitignore）
+- **现象**：`data/kb.db`、`knowledge/` 未跟踪且未被 gitignore，commit 易误塞二进制库；`data/agent_pro.db`（记忆/任务 store，运行时生成）虽被跟踪，但同属可重建产物。
+- **处置（已做）**：`.gitignore` 增加 `data/*.db` 与 `knowledge/`；并对已跟踪的 `data/agent_pro.db` 执行 `git rm --cached`（保留本地文件，仅停止入库）。此后 `git status` 不再列出这些生成物。
+- **注意**：两个库均为可重建（kb 可 `uv run python -m agent_pro.kb reindex` 重生；agent_pro.db 启动时自动建表）。
+
+### 26. `rag/` 死占位与 `kb/` 功能重复（已删）
+- **现象**：`src/agent_pro/rag/`（ingest.py/retrieve.py）仅 TODO 空实现，与 v0.6 新建的 `kb/` 功能重叠，无引用、纯死代码。
+- **处置（已做）**：用户已手动删除 `rag/` 整目录，删除已 staged（`D src/agent_pro/rag/*`）。`kb/` 为唯一知识库实现。
+- **1.0 建议**：在 `CONTRIBUTING.md` 明确「占位模块要么实现要么删，禁止留 TODO 空壳」；删除前已确认无任何 import 引用 `rag` 包。
+
+---
+
+## 六、本轮修复（v0.6 embedding 打通）
+
+### 27. `tiktoken` 阻塞非 OpenAI embedding 模型（已修，验证通过）
+- **现象**：vLLM embedding 服务本身通（PowerShell `Invoke-RestMethod` 调 `localhost:8001/v1/embeddings` 正常返回 1024 维向量）；但项目 `uv run python -m agent_pro.kb reindex` 后 `embedded_chunks: 0`、`retrieval_mode: fts-keyword`，向量始终填不进。
+- **根因**：`embeddings.py` 用 `langchain_openai.OpenAIEmbeddings`，其 `embed_query` 默认 `check_embedding_ctx_length=True` → 对非 OpenAI 模型名（`Qwen3-Embedding-0.6B`）`tiktoken.encoding_for_model` 抛 KeyError → 回退下载 `cl100k_base` BPE 词表 → 请求 `openaipublic.blob...cl100k_base.tiktoken` 返回 **400**（受限/离线网络），异常被 `ingest.py` 的 `except` 静默吞掉 → `emb=None` 降级 FTS。
+- **处置（已做）**：`OpenAIEmbeddings(..., check_embedding_ctx_length=False)` 跳过 tiktoken 分词。`reindex` 复测：8/8 块向量覆盖、`dim=1024`、`retrieval_mode: hybrid`、search 正常返回融合结果。属**硬阻塞 bug**（非优化），故本轮直接修并验证，未延后 1.0。
+- **1.0 建议**：① 该 fix 保留；② 顺带把 `ingest.py` 的「单块 embedding 失败静默降级」加日志/计数告警，避免再出现「看起来导入成功实则全 FTS」的假象（与 #24 验证缺失同源）。
+
+### 28. `knowledge/project-notes.txt` 检索内容乱码（疑似 .txt 编码误判，待查）
+- **现象**：`search` 命中 [1] `project-notes.txt` 的 content 显示为 `A g e n t P r o` 字符间插空/乱码（类似 UTF-16LE 无 BOM 被当 ASCII/UTF-8 读）。
+- **根因（推测，未确认）**：`kb/parsers.py` 对 `.txt` 未显式探测编码（如 chardet / BOM），该文件实际可能是 UTF-16 或其它编码，被默认解码成脏字节。
+- **当前处置**：不影响 embedding 主链路（向量维度正确、检索召回正常），仅该单文件内容展示异常。
+- **1.0 建议**：`parsers.py` 读文本前做编码探测（BOM 优先 → chardet 兜底），或重存该文件为 UTF-8。需先 `file`/十六进制确认真实编码再定方案。
