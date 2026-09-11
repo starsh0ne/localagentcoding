@@ -7,6 +7,8 @@
 import asyncio
 import json
 import secrets
+import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -17,8 +19,10 @@ from agent_pro.api.bus import get_event_bus
 from agent_pro.api.worker import get_worker
 from agent_pro.config import get_settings
 from agent_pro.memory.store import get_memory_db
+from agent_pro.observability import context, get_logger
 from agent_pro.tasks.store import get_task_store
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+log = get_logger("api")
 HEARTBEAT_S = 15
 async def require_api_key(x_api_key: str = Header(alias="X-API-Key")) -> None:
     if x_api_key != get_settings().api_auth_key:
@@ -45,6 +49,22 @@ async def lifespan(app: FastAPI):
         worker_task.cancel()
         cleanup_task.cancel()
 app = FastAPI(title="Agent Pro API", version=__version__, lifespan=lifespan)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    rid = uuid.uuid4().hex
+    start = time.monotonic()
+    with context(request_id=rid):
+        response = await call_next(request)
+        duration = time.monotonic() - start
+        log.info("HTTP 请求", extra={
+            "event_kind": "http",
+            "method": request.method,
+            "path": request.url.path,
+            "status": response.status_code,
+            "duration_s": round(duration, 3)})
+    return response
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": __version__}

@@ -80,3 +80,27 @@
 ### 已知债务
 - doc/docx/xlsx/csv/PDF解析器(注册表已就位, 加函数即扩);
   目录监听增量更新(用户决策: 后续版本); 内存余弦仅自用规模适用
+
+## v0.7.0 — 可观测性（结构化日志 + 成本/Token 核算）【已实现】
+### 范围决策（用户 2026-09-10 确认）
+- 范围：日志 + 成本账本（最小可用，满足生产 Tier-1）
+- 追踪后端：LangSmith（**本版不做追踪**，该选择留作后续追踪版）
+- 成本落地：仅结构化日志（不建 SQLite 账本、不暴露 /metrics）
+### 新增
+- observability/logging_setup.py：stdlib-only `JsonFormatter`（单行 JSON）+ `RotatingFileHandler`（10MB×5, UTF-8），日志双写 stdout + `logs/agent_pro.log`；`contextvars` 上下文(session/turn/request/agent/model)经 `ContextFilter` 自动注入每条记录；`setup_logging()` 幂等；`context()` 上下文管理器
+- observability/cost.py：`TokenUsageCallbackHandler(BaseCallbackHandler)` 兼容读取 LangChain `usage_metadata` 与 `llm_output["token_usage"]`；`MODEL_PRICING` 价格表（deepseek 系列已填，未知模型退化为只记 token）；`summary()` 出按模型拆分 + 估算费用
+- observability/__init__.py：统一导出 setup_logging / context / cost handler 等
+### 变更
+- config.py：加 `LOG_LEVEL` / `LOG_DIR`
+- api/__main__.py / main.py：启动调用 `setup_logging`
+- api/server.py：加 HTTP 中间件（request_id + method/path/status/耗时）
+- api/worker.py：每 turn 独立 cost handler（经 contextvar 透传给 coder 子 Agent 累加同一笔账）；turn 起止/异常结构化日志；`dispatch` 调度决策日志；turn 结束记 `cost_summary`
+- agents/coder.py：handoff 透传 cost handler + 标注 agent="coder" 上下文
+- .env.example：补 LOG_LEVEL / LOG_DIR
+### 设计要点（相对方案微调）
+- cost handler **按 turn 作用域**（每轮新建，经 contextvar 注入 worker/coder 共享），而非方案原写的「挂到 agent 构造全局」——避免跨 turn 累加；turn 结束即读 `summary()`
+- 上下文用 `with observe.context(...)` 在进入作用域时设置、退出时还原，支持嵌套（coder 内 agent 标签覆盖，退出后回退 general）
+### 执行方案
+- 详见 `docs/plans/v0.7-execution-plan.md`
+### 已知边界
+- 不含 tracing / 成本库 / /metrics / 看板（按决策）

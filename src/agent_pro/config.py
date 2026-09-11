@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     api_auth_key: str = ""  # 留空时API拒绝启动，CLI不受影响
     # v0.6: 私有知识库文档目录(导入扫描根)
     kb_dir: Path = Path("./knowledge")
+    # v0.7: 可观测性(结构化日志)
+    log_level: str = "INFO"          # DEBUG/INFO/WARNING/ERROR
+    log_dir: Path = Path("./logs")   # 日志落盘目录(运行时产物，已 gitignore)
 
 
 @lru_cache

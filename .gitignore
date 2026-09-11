@@ -21,3 +21,4 @@ venv/
 # ===== 生成产物/数据(可重建, 勿提交) =====
 data/*.db
 knowledge/
+logs/

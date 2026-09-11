@@ -16,9 +16,12 @@ from langchain.tools import tool
 from langgraph.errors import GraphRecursionError
 from agent_pro.api.bus import get_event_bus
 from agent_pro.config import build_model, get_settings
+from agent_pro.observability import context, get_cost_handler, get_logger
 from agent_pro.tools.env_tools import pip_install
 from agent_pro.tools.workspace_files import make_workspace_tools
 from agent_pro.tools.knowledge_tools import search_knowledge
+
+log = get_logger("agent.coder")
 
 @dataclass(frozen=True)
 class TaskContext:
@@ -80,28 +83,32 @@ class AgentRegistry:
             topic = f"task:{task_id}" if task_id else None
             bus = get_event_bus()
             collected = []
+            # v0.7: 透传当前 turn 的 cost handler，使子Agent token 累加进同一笔账
+            cost_handler = get_cost_handler()
+            callbacks = [cost_handler] if cost_handler is not None else None
             try:
                 # v0.5: stream替代invoke——子Agent内部动作实时外推
-                for update in agent.stream(
-                        {"messages": [{"role": "user", "content": task_description}]},
-                        config={"recursion_limit": limit},
-                        stream_mode="updates"):
-                    for payload in update.values():
-                        chunk = (payload.get("messages", [])
-                                 if isinstance(payload, dict) else [])
-                        if not isinstance(chunk, list):
-                            chunk = [chunk]
-                        for m in chunk:
-                            collected.append(m)
-                            if topic:
-                                for tc in getattr(m, "tool_calls", None) or []:
-                                    bus.publish(topic, "tool_call", {
-                                        "name": tc.get("name"),
-                                        "args_brief": str(tc.get("args"))[:120]})
-                                if getattr(m, "type", "") == "tool":
-                                    bus.publish(topic, "tool_result", {
-                                        "name": getattr(m, "name", ""),
-                                        "brief": str(m.content)[:120]})
+                with context(agent="coder"):
+                    for update in agent.stream(
+                            {"messages": [{"role": "user", "content": task_description}]},
+                            config={"recursion_limit": limit, "callbacks": callbacks},
+                            stream_mode="updates"):
+                        for payload in update.values():
+                            chunk = (payload.get("messages", [])
+                                     if isinstance(payload, dict) else [])
+                            if not isinstance(chunk, list):
+                                chunk = [chunk]
+                            for m in chunk:
+                                collected.append(m)
+                                if topic:
+                                    for tc in getattr(m, "tool_calls", None) or []:
+                                        bus.publish(topic, "tool_call", {
+                                            "name": tc.get("name"),
+                                            "args_brief": str(tc.get("args"))[:120]})
+                                    if getattr(m, "type", "") == "tool":
+                                        bus.publish(topic, "tool_result", {
+                                            "name": getattr(m, "name", ""),
+                                            "brief": str(m.content)[:120]})
             except GraphRecursionError:
                 return (f"错误: {spec.name}任务超过最大步数({limit})被中断。"
                         f"建议缩小任务范围或拆分为多段分别调度。")
