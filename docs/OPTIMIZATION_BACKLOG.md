@@ -191,3 +191,15 @@
 - **根因（推测，未确认）**：`kb/parsers.py` 对 `.txt` 未显式探测编码（如 chardet / BOM），该文件实际可能是 UTF-16 或其它编码，被默认解码成脏字节。
 - **当前处置**：不影响 embedding 主链路（向量维度正确、检索召回正常），仅该单文件内容展示异常。
 - **1.0 建议**：`parsers.py` 读文本前做编码探测（BOM 优先 → chardet 兜底），或重存该文件为 UTF-8。需先 `file`/十六进制确认真实编码再定方案。
+
+### 29. chat 端点不校验 session 存在性（健壮性缺口）
+- **现象**：`POST /api/sessions/{session_id}/chat` 直接用 URL 路径里的 `session_id` 作为会话标识，**不校验该 session 是否先经 `POST /api/sessions` 创建过**。验证时用户用字面占位符 `<sid>` 发请求，服务端接受并返回 `session_id:"<sid>"`、`turn_id` 正常 `queued` —— 即任意字符串都能当 session 名成功触发一轮 agent 执行。
+- **根因**：server.py 的 chat 路由把路径参数直接传给 worker / SessionManager，无「session 是否存在」前置检查；对比 `/api/chat/turns/{turn_id}/events` 在 turn 不存在时返 404，两处行为不一致。
+- **当前处置**：功能上不阻塞（worker 只认 turn_id，turn 仍正常跑）；但会产生脏 session 名、续聊/历史查询歧义，且暴露「鉴权只挡了缺 key，未挡非法/未建 session 即可触发执行」的隐患。
+- **1.0 建议**：chat 路由前置校验 session 存在（不存在返 404 + 明确 detail），或在 chat 时按需惰性创建 session（二选一，需用户决策）。属生产 Tier-1 健壮性，本轮记而不改。
+
+### 30. v0.7 回归：coder handoff 局部变量 `context` 遮蔽导入的 `context()`（已修）
+- **现象**：任何触发 `dispatch_to_coder` 的代码任务直接报错 `TypeError: 'NoneType' object is not callable`，栈顶在 `coder.py` `with context(agent="coder"):`。用户早前的 `turn-20260910-214410-7279fb`（番茄钟）实际即命中此错（当时误判为「仍在跑」）；v0.7 的冒烟只验证了非代码对话，未覆盖 dispatch 路径，故漏检。
+- **根因**：v0.7 在 `coder.py` handoff 内加了 `with context(agent="coder"):` 用于标注 coder 日志上下文，但该函数早有**局部变量** `context = None`（解析出的 TaskContext），把从 `agent_pro.observability` 导入的 `context()` 上下文管理器**遮蔽**成 None。无 task_id 时 `context` 保持 None → `None(...)` 调用报错。
+- **处置（已做）**：把局部变量 `context` 重命名为 `task_ctx`（4 处：赋值/解析/判空/`spec.build(context)`），保留 `with context(agent="coder")` 用导入函数。重跑导入+编译+代码任务 E2E 通过。属**硬阻塞回归 bug**（coder 整条路径不可用），故本轮直接修。
+- **教训**：在已导入 `context` 的函数内，勿用同名局部变量；v0.7 评审只跑了非代码冒烟，dispatch 路径缺回归——后续每版冒烟须含至少一次代码任务。

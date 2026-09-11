@@ -20,7 +20,10 @@ from agent_pro.api.worker import get_worker
 from agent_pro.config import get_settings
 from agent_pro.memory.store import get_memory_db
 from agent_pro.observability import context, get_logger
+from agent_pro.sandbox.wsl_exec import run_in_wsl
 from agent_pro.tasks.store import get_task_store
+from agent_pro.tools.verify_tools import (finalize, get_request, try_claim,
+                                          SANDBOX_TIMEOUT_S)
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 log = get_logger("api")
 HEARTBEAT_S = 15
@@ -29,6 +32,11 @@ async def require_api_key(x_api_key: str = Header(alias="X-API-Key")) -> None:
         raise HTTPException(status_code=401, detail="invalid api key")
 class ChatBody(BaseModel):
     message: str
+
+
+class ApproveBody(BaseModel):
+    approve: bool
+    comment: str = ""
 def _sse(evt: dict) -> str:
     return (f"event: {evt['type']}\nid: {evt['seq']}\n"
             f"data: {json.dumps(evt['data'], ensure_ascii=False)}\n\n")
@@ -86,6 +94,39 @@ async def turn_status(turn_id: str, _: None = Depends(require_api_key)):
     return {"turn_id": turn.turn_id, "session_id": turn.session_id,
             "status": turn.status, "result": turn.result,
             "error": turn.error, "created_at": turn.created_at}
+@app.post("/api/turns/{turn_id}/approve")
+async def approve_turn(turn_id: str, body: ApproveBody,
+                       _: None = Depends(require_api_key)):
+    """HITL 执行审批闸(v0.8): 确认 coder 自验命令是否在沙箱执行。
+    approve=false → 拒绝, agent 调整/说明; approve=true → 在 WSL 沙箱执行并回填。"""
+    if get_request(turn_id) is None:
+        raise HTTPException(status_code=404, detail="无待审批请求")
+    if not try_claim(turn_id):
+        raise HTTPException(status_code=409, detail="该请求已处理")
+    entry = get_request(turn_id)
+    bus = get_event_bus()
+    if not body.approve:
+        finalize(turn_id, False, result=body.comment or "用户拒绝执行")
+        bus.publish(f"turn:{turn_id}", "approval_result",
+                    {"approve": False, "comment": body.comment})
+        log.info("执行审批拒绝", extra={"event_kind": "approval_result",
+                                        "approve": False, "turn_id": turn_id})
+        return {"status": "rejected"}
+    # 通过 → 沙箱(WSL2)执行; to_thread 不阻塞事件循环
+    res = await asyncio.to_thread(
+        run_in_wsl, command=entry["command"], cwd_win=entry["cwd_win"],
+        timeout=SANDBOX_TIMEOUT_S)
+    finalize(turn_id, True, result=res.to_text(),
+             exit_code=res.returncode, duration_s=res.duration_s)
+    bus.publish(f"turn:{turn_id}", "approval_result",
+                {"approve": True, "exit_code": res.returncode,
+                 "duration_s": res.duration_s})
+    log.info("执行审批通过·沙箱已运行", extra={
+        "event_kind": "approval_result", "approve": True,
+        "turn_id": turn_id, "exit_code": res.returncode,
+        "duration_s": res.duration_s})
+    return {"status": "approved", "exit_code": res.returncode,
+            "timed_out": res.timed_out}
 @app.get("/api/chat/turns/{turn_id}/events")
 async def turn_events(turn_id: str, request: Request,
                       _: None = Depends(require_api_key)):

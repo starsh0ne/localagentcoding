@@ -96,6 +96,11 @@ def get_cost_handler():
     return _ctx_cost.get()
 
 
+def get_turn_id() -> str | None:
+    """读取当前上下文的 turn_id(供工具判断是否在轮次内, 如审批请求)。"""
+    return _ctx_turn.get()
+
+
 class JsonFormatter(logging.Formatter):
     """输出单行 JSON: ts/level/logger/service/event + 上下文 + 任意 extra。"""
 

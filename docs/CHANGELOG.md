@@ -104,3 +104,30 @@
 - 详见 `docs/plans/v0.7-execution-plan.md`
 ### 已知边界
 - 不含 tracing / 成本库 / /metrics / 看板（按决策）
+
+## v0.8.0 — 代码执行隔离沙箱（含 HITL 审批闸）【已实现】
+### 版本号决策
+- 本版覆盖原蓝图 v0.8「权限注册」；原蓝图 v0.8 权限注册顺延为 **v0.9**（其「危险操作审批闸」已在本版以基础形态落地，完整工具级权限模型留 v0.9）。
+### 范围决策（用户 2026-09-11 拍板）
+- 隔离技术：**WSL2 子环境**（备选 Docker 隔离最强但需装 Desktop/冷启动慢；受限子进程零依赖但同 OS 用户、能读宿主机 .env）
+- 触发范围：**仅 coder 自验/测试**（备选全部 exec 工具工作量过大；仅危险操作需界定且普通读仍暴露）
+- 网络策略：**允许出网（pip 可用）**（备选完全禁网则测试装不了依赖；白名单域名需维护）
+- HITL 审批：**执行前需确认**（备选全自动则危险代码直接执行风险高）
+### 目标
+- coder 交付前对生成代码做自验，执行发生在 WSL2 隔离子环境，网络放行，每次执行前需用户确认；普通对话不进沙箱；直接消化 backlog #24（交付物无验证关卡）
+### 新增
+- `sandbox/wsl_exec.py`：`run_in_wsl(command, cwd_win, timeout)` —— Windows 路径→`/mnt/c/...` 映射、`bash -lc` 执行、超时硬杀、stdout/stderr 截断(20K/8K)、UTF-8 locale 强制、`WSL_AVAILABLE` 探测；不可用则降级报错（不静默回退宿主机）
+- `sandbox/__init__.py`：导出 `run_in_wsl` / `SandboxResult` / `wsl_available`
+- `tools/verify_tools.py`：`request_verification` 工具（取 turn_id→注册审批请求→发布 `approval_request` 事件→`threading.Event.wait` 阻塞 worker 线程→结果回填）；共享审批注册表 `register_request/get_request/cleanup_request/try_claim/finalize`（worker 线程写、API 线程读）
+- `api/server.py`：`POST /api/turns/{turn_id}/approve`（复用 `require_api_key`）——`approve=false` 拒绝；`approve=true` 经 `asyncio.to_thread(run_in_wsl)` 沙箱执行并回填；双点击由 `try_claim` 原子占位防重入
+### 变更
+- `observability/logging_setup.py`：加 `get_turn_id()`（工具判断是否在轮次内）
+- `agents/coder.py`：挂载 `request_verification` 到 CODER_TOOLS；`CODER_SYSTEM_PROMPT` 加「交付前自验」步与沙箱约束（禁读 .env/宿主目录、cwd_win 必传工作区路径）
+- `api/worker.py`：无改动（审批状态机在工具+端点+注册表协作完成，worker 仅透传上下文）
+### 设计要点
+- 阻塞安全：worker 经 `asyncio.to_thread` 跑 `_execute`，`Event.wait` 在工作线程，不占事件循环（端点照常处理）；上下文经 contextvars 透传，工具内能取到 turn_id
+- 中等隔离定位：防误用 + 进程/目录隔离，**不防针对性恶意代码读 Windows 盘**（WSL 默认挂 /mnt/c）
+### 执行方案
+- 详见 `docs/plans/v0.8-execution-plan.md`
+### 已知边界
+- 隔离强度中等（非 Docker 级）；审批等待时串行整队挂起（异步中断 LangGraph `interrupt()` 留后续）；允许出网（白名单域名留后续）；完整权限模型顺延 v0.9；仅超时护栏无 CPU/内存硬限额；CLI 模式无 turn_id 故不触发审批（仅 API 模式支持，自验需走 API）

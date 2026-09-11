@@ -20,6 +20,7 @@ from agent_pro.observability import context, get_cost_handler, get_logger
 from agent_pro.tools.env_tools import pip_install
 from agent_pro.tools.workspace_files import make_workspace_tools
 from agent_pro.tools.knowledge_tools import search_knowledge
+from agent_pro.tools.verify_tools import request_verification
 
 log = get_logger("agent.coder")
 
@@ -70,14 +71,14 @@ class AgentRegistry:
 
         @tool(tool_name, description=description)
         def handoff(task_description: str, task_id: str | None = None) -> str:
-            context = None
+            task_ctx = None
             if task_id:
                 if not self._resolve:
                     return "错误: 当前环境不支持任务上下文"
-                context = self._resolve(task_id)
-                if context is None:
+                task_ctx = self._resolve(task_id)
+                if task_ctx is None:
                     return f"错误: 任务不存在: {task_id}，请用read_task_progress核对task_id"
-            agent = spec.build(context)
+            agent = spec.build(task_ctx)
             limit = get_settings().agent_recursion_limit
             started = time.monotonic()
             topic = f"task:{task_id}" if task_id else None
@@ -129,9 +130,16 @@ CODER_SYSTEM_PROMPT = """你是 coder 专家Agent，负责在工作区生成真�
    每次 write_file 必须写入完整内容（覆盖语义）。
 2. 文件相对路径基于当前任务工作区；多文件项目自行组织目录结构。
 3. 需要第三方依赖时用 pip_install 安装（包名+版本约束，多个用空格分隔）。
-4. 交付时简要说明文件结构与运行方式；除非已真实运行验证，
+4. 交付前自验（强烈推荐）：写完代码后，用 request_verification 在隔离沙箱
+   执行验证命令（如跑测试/启动程序），执行前会请求用户人工确认。
+   - cwd_win 必须传本次任务的工作区绝对路径（工作区根 + 项目子目录，
+     例如当前工作区为 C:\\Users\\26024\\Desktop\\agent-pro\\workspace\\pomodoro）。
+   - 命令必须限定在工作区内；禁止读宿主机凭据(.env/ssh)或访问
+     /mnt/c/Users 等宿主目录；沙箱允许出网以便 pip 安装依赖。
+   - 若用户拒绝执行，说明无法自验并交付现状，不要编造运行结果。
+5. 交付时简要说明文件结构与运行方式；除非已通过沙箱真实运行验证，
    否则不要附"运行示例"输出，避免编造未验证的结果。
-5. 任务描述已自包含（含目标、约束、已知信息），直接执行即可。
+6. 任务描述已自包含（含目标、约束、已知信息），直接执行即可。
 
 """
 
@@ -139,7 +147,8 @@ CODER_SYSTEM_PROMPT = """你是 coder 专家Agent，负责在工作区生成真�
 def build_coder_agent(context: TaskContext | None = None) -> Runnable:
     settings = get_settings()
     root = context.workspace_dir if context else settings.workspace_dir
-    tools = make_workspace_tools(root, include_write=True) + [pip_install]
+    tools = make_workspace_tools(root, include_write=True) + [
+        pip_install, request_verification]
     return create_agent(
         build_model(),
         tools=tools,
