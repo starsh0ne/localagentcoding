@@ -14,6 +14,7 @@ from agent_pro.observability import get_logger, get_turn_id
 from agent_pro.sandbox.wsl_exec import WSL_AVAILABLE
 
 log = get_logger("agent.verify")
+from agent_pro.api.state_store import get_state_store
 
 # ---- 共享审批注册表(turn_id → entry); worker线程写, API线程读 ----
 _approval_lock = threading.Lock()
@@ -39,6 +40,9 @@ def register_request(turn_id: str, command: str,
     }
     with _approval_lock:
         _approval_registry[turn_id] = entry
+    # v0.9: 审批元数据持久化(重启可查), Event 原语仍留内存(阻塞必需)
+    get_state_store().set_approval_meta(turn_id, {
+        "command": command, "cwd_win": cwd_win, "note": note, "decision": None})
     return entry
 
 
@@ -50,6 +54,7 @@ def get_request(turn_id: str) -> dict | None:
 def cleanup_request(turn_id: str) -> None:
     with _approval_lock:
         _approval_registry.pop(turn_id, None)
+    get_state_store().clear_approval(turn_id)
 
 
 def try_claim(turn_id: str) -> bool:
@@ -60,7 +65,9 @@ def try_claim(turn_id: str) -> bool:
         if e is None or e["decision"] is not None:
             return False
         e["decision"] = "processing"
-        return True
+    # v0.9: Redis SET NX 原子占位防双批(跨进程/重启冗余保障; 单进程内存锁已够)
+    get_state_store().claim_approval(turn_id)
+    return True
 
 
 def finalize(turn_id: str, decision: bool, result: str | None = None,
@@ -75,6 +82,9 @@ def finalize(turn_id: str, decision: bool, result: str | None = None,
         e["exit_code"] = exit_code
         e["duration_s"] = duration_s
         e["event"].set()
+    get_state_store().update_approval_meta(turn_id, decision=decision,
+                                          result=result, exit_code=exit_code,
+                                          duration_s=duration_s)
 
 
 @tool("request_verification", description=(

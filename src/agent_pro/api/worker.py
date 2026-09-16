@@ -9,12 +9,13 @@ import secrets
 import threading
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
 from agent_pro.agents import create_app_agent
 from agent_pro.api.bus import get_event_bus
 from agent_pro.config import get_settings
+from agent_pro.api.state_store import get_state_store
 from agent_pro.memory.manager import SessionManager
 from agent_pro.observability import (context, get_logger, reset_cost_handler,
                                      set_cost_handler, TokenUsageCallbackHandler)
@@ -44,21 +45,29 @@ class TurnWorker:
             session_id=session_id, message=message)
         self.turns[turn.turn_id] = turn
         self.queue.put_nowait(turn)
+        get_state_store().put_turn(asdict(turn))  # v0.9 持久化
         return turn
 
     def get(self, turn_id: str) -> Turn | None:
-        return self.turns.get(turn_id)
+        t = self.turns.get(turn_id)
+        if t is not None:
+            return t
+        d = get_state_store().get_turn(turn_id)  # v0.9 重启恢复
+        return Turn(**d) if d else None
 
     async def run(self) -> None:
         while True:
             turn = await self.queue.get()
             turn.status = "running"
+            get_state_store().update_turn(turn.turn_id, status="running")
             log.info("turn 开始", extra={"turn_id": turn.turn_id,
                                          "session_id": turn.session_id,
                                          "event_kind": "turn_start"})
             try:
                 await asyncio.to_thread(self._execute, turn)
                 turn.status = "done"
+                get_state_store().update_turn(turn.turn_id, status="done",
+                                             result=turn.result)
                 log.info("turn 完成", extra={"turn_id": turn.turn_id,
                                              "session_id": turn.session_id,
                                              "event_kind": "turn_done",
@@ -66,6 +75,8 @@ class TurnWorker:
             except Exception as e:  # 兜底: worker永不退出
                 turn.status = "error"
                 turn.error = f"{type(e).__name__}: {e}"
+                get_state_store().update_turn(turn.turn_id, status="error",
+                                             error=turn.error)
                 log.error("turn 异常", extra={"turn_id": turn.turn_id,
                                               "session_id": turn.session_id,
                                               "event_kind": "turn_error",

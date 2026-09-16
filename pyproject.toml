@@ -1,7 +1,7 @@
 [project]
 name = "agent-pro"
 version = "0.5.0"
-description = "分阶段自研 Agent 应用 (v0.1 → v0.8)"
+description = "分阶段自研 Agent 应用 (v0.1 → v0.9)"
 readme = "docs/CHANGELOG.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -23,6 +23,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# v0.9 状态持久化后端(可选): 安装后启用 Redis 持久化; 未装则降级内存态(不阻断启动)
+redis = ["redis>=5.0"]
 dev = ["pytest>=8.0", "ruff>=0.4"]
 
 [build-system]

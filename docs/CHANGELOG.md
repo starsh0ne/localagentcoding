@@ -131,3 +131,29 @@
 - 详见 `docs/plans/v0.8-execution-plan.md`
 ### 已知边界
 - 隔离强度中等（非 Docker 级）；审批等待时串行整队挂起（异步中断 LangGraph `interrupt()` 留后续）；允许出网（白名单域名留后续）；完整权限模型顺延 v0.9；仅超时护栏无 CPU/内存硬限额；CLI 模式无 turn_id 故不触发审批（仅 API 模式支持，自验需走 API）
+
+## v0.9.0 — 生产就绪加固【已实现】
+### 决策点（用户 2026-09-16 拍板）
+- A1 持久化存储：**Redis**（本地无 Redis 时降级内存态 + 启动告警，不阻断启动）
+- A2 chat 未建 session：**惰性创建**（不再把任意字符串当已存在 session）
+- A3 加固范围：**全做**（状态持久化 + session 惰性创建 + 修 #19 SSE 晚连接挂死 + 修 #21 缺头 422→401）
+### 新增
+- `api/state_store.py`：状态后端（Redis 优先 + 进程内内存降级）；`TurnRegistry`（turn 持久化，重启可恢复）+ `ApprovalRegistry`（审批元数据 + `SET NX` 原子防双批）；`import redis` 软依赖，未装则降级不阻断启动
+- `config.py`/`pyproject.toml`/`.env.example`：`redis_url`（默认 `redis://localhost:6379`）；`redis` 为**可选依赖**（`[project.optional-dependencies].redis`，`pip install -e ".[redis]"` 启用，未装则软降级内存态，不阻断启动）
+### 变更
+- `api/worker.py`：turn 注册表接 state_store（submit 落库、get 重启恢复、run 循环 status/result/error 同步）
+- `tools/verify_tools.py`：审批元数据落 state_store；`try_claim` 增 Redis `SET NX` 占位（防双批）；`threading.Event` 阻塞原语保留内存
+- `api/server.py`：`require_api_key` 缺头/错头均 401（#21）；chat 路由 `ensure_session` 惰性创建并记日志（#29）；`/events` 回放遇 final/error 即 `return` 关闭流（#19），回放为空时从 state_store 恢复终态（重启后晚连接可关闭）
+- `memory/store.py`：`ensure_session` 返回是否新建（供惰性创建日志）
+- `api/__main__.py`：启动提前探测 Redis 后端
+### 设计要点
+- 降级优先：Redis 不可用 → 内存态 + `WARNING` 日志，服务照常起（history/SQLite 仍兜底）
+- 审批注册表含 `threading.Event` 阻塞原语且生命周期绑定进程内 worker 线程，跨重启不可恢复，故**仅元数据 + 防双批占位持久化**，不持久化阻塞状态（合理取舍，已在方案注明）
+- 401 语义统一：`Header(default=None)` 让缺头不再被 FastAPI 当参数校验（原 422）而显式返 401
+### 已知边界
+- Redis 降级时 turn/approval 持久化失效（靠 history 兜底），生产须保证 Redis 可用
+- 惰性创建仍可能产生脏 session 名（无害，可被显式 `POST /sessions` 覆盖）
+- 出网/CPU 限额、CORS、HTTPS 反代不在本期（留 v1.0 或独立运维项）
+- 完整工具级权限模型（蓝图原 v0.9）顺延，本期只做基础设施加固
+### 执行方案
+- 详见 `docs/plans/v0.9-execution-plan.md`

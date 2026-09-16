@@ -1,5 +1,6 @@
 # api/__main__.py | v0.5诞生（启动入口: uv run python -m agent_pro.api） → v0.7(+日志)
 import uvicorn
+from agent_pro.api.state_store import get_state_store
 from agent_pro.config import get_settings
 from agent_pro.observability import setup_logging
 
@@ -7,5 +8,6 @@ from agent_pro.observability import setup_logging
 if __name__ == "__main__":
     s = get_settings()
     setup_logging(level=s.log_level, log_dir=s.log_dir)
+    get_state_store()  # v0.9: 提前探测 Redis 后端(不可用则降级内存 + 告警, 不阻断启动)
     # 注意: workers必须为1——队列与事件总线在进程内存中
     uvicorn.run("agent_pro.api.server:app", host=s.api_host, port=s.api_port)

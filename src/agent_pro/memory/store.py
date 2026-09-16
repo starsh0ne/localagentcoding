@@ -50,12 +50,17 @@ class MemoryDB:
         self.conn.commit()
 
     # ---------- 会话与消息（每方法持锁，快速进出） ----------
-    def ensure_session(self, sid: str) -> None:
+    def ensure_session(self, sid: str) -> bool:
+        """确保会话存在; 返回是否「本次新建」(v0.9 供惰性创建日志使用)。"""
         with self._lock:
-            self.conn.execute(
-                "INSERT OR IGNORE INTO sessions(id, created_at, updated_at)"
-                " VALUES(?,?,?)", (sid, _now(), _now()))
-            self.conn.commit()
+            exists = self.conn.execute(
+                "SELECT 1 FROM sessions WHERE id=?", (sid,)).fetchone() is not None
+            if not exists:
+                self.conn.execute(
+                    "INSERT INTO sessions(id, created_at, updated_at)"
+                    " VALUES(?,?,?)", (sid, _now(), _now()))
+                self.conn.commit()
+            return not exists
 
     def get_summary(self, sid: str) -> str:
         with self._lock:

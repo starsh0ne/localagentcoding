@@ -20,6 +20,7 @@ from agent_pro.api.worker import get_worker
 from agent_pro.config import get_settings
 from agent_pro.memory.store import get_memory_db
 from agent_pro.observability import context, get_logger
+from agent_pro.api.state_store import get_state_store
 from agent_pro.sandbox.wsl_exec import run_in_wsl
 from agent_pro.tasks.store import get_task_store
 from agent_pro.tools.verify_tools import (finalize, get_request, try_claim,
@@ -27,7 +28,10 @@ from agent_pro.tools.verify_tools import (finalize, get_request, try_claim,
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 log = get_logger("api")
 HEARTBEAT_S = 15
-async def require_api_key(x_api_key: str = Header(alias="X-API-Key")) -> None:
+async def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+    # v0.9(#21): 缺头/错头均返 401(原缺头会被 FastAPI 当参数校验失败返 422)
+    if x_api_key is None:
+        raise HTTPException(status_code=401, detail="missing api key")
     if x_api_key != get_settings().api_auth_key:
         raise HTTPException(status_code=401, detail="invalid api key")
 class ChatBody(BaseModel):
@@ -84,6 +88,11 @@ async def new_session(_: None = Depends(require_api_key)):
 async def chat(session_id: str, body: ChatBody, _: None = Depends(require_api_key)):
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="message不能为空")
+    # v0.9(#29): 惰性创建 session — 不存在则建(返回是否新建用于日志), 不再静默用任意字符串
+    created = get_memory_db().ensure_session(session_id)
+    if created:
+        log.info("惰性创建 session", extra={"event_kind": "session_create",
+                                            "session_id": session_id})
     turn = get_worker().submit(session_id, body.message.strip())
     return {"turn_id": turn.turn_id, "session_id": session_id, "status": turn.status}
 @app.get("/api/chat/turns/{turn_id}")
@@ -143,6 +152,17 @@ async def turn_events(turn_id: str, request: Request,
         try:
             for evt in replay:            # 晚连接/重连: 先补历史
                 yield _sse(evt)
+                if evt["type"] in ("final", "error"):
+                    return               # 终态已在回放中 → 关闭流(v0.9 #19)
+            # 回放为空(可能服务刚重启, 总线无缓冲) → 尝试从状态后端恢复终态
+            if not replay:
+                d = get_state_store().get_turn(turn_id)
+                if d and d.get("status") in ("done", "error"):
+                    term = "final" if d["status"] == "done" else "error"
+                    data = ({"content": d.get("result") or ""}
+                            if term == "final" else {"error": d.get("error") or ""})
+                    yield _sse({"seq": 0, "type": term, "data": data})
+                    return
             while True:
                 try:
                     evt = await asyncio.wait_for(q.get(), timeout=HEARTBEAT_S)
