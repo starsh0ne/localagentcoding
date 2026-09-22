@@ -27,11 +27,16 @@ def _now() -> str:
 class MemoryDB:
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = db_path
         self._lock = threading.RLock()
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript("""
+        self._local = threading.local()  # v1.0: 每线程持有一个连接(连接复用)
+
+    def _new_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.executescript("""
         CREATE TABLE IF NOT EXISTS sessions(
             id TEXT PRIMARY KEY, summary TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -47,72 +52,80 @@ class MemoryDB:
             embedding TEXT, source_session TEXT, created_at TEXT NOT NULL);
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content, memory_id UNINDEXED);
         """)
-        self.conn.commit()
+        conn.commit()
+        return conn
+
+    def _conn(self) -> sqlite3.Connection:
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._new_conn()
+            self._local.conn = c
+        return c
 
     # ---------- 会话与消息（每方法持锁，快速进出） ----------
     def ensure_session(self, sid: str) -> bool:
         """确保会话存在; 返回是否「本次新建」(v0.9 供惰性创建日志使用)。"""
         with self._lock:
-            exists = self.conn.execute(
+            exists = self._conn().execute(
                 "SELECT 1 FROM sessions WHERE id=?", (sid,)).fetchone() is not None
             if not exists:
-                self.conn.execute(
+                self._conn().execute(
                     "INSERT INTO sessions(id, created_at, updated_at)"
                     " VALUES(?,?,?)", (sid, _now(), _now()))
-                self.conn.commit()
+                self._conn().commit()
             return not exists
 
     def get_summary(self, sid: str) -> str:
         with self._lock:
-            row = self.conn.execute(
+            row = self._conn().execute(
                 "SELECT summary FROM sessions WHERE id=?", (sid,)).fetchone()
             return row["summary"] if row else ""
 
     def set_summary(self, sid: str, summary: str) -> None:
         with self._lock:
-            self.conn.execute(
+            self._conn().execute(
                 "UPDATE sessions SET summary=?, updated_at=? WHERE id=?",
                 (summary, _now(), sid))
-            self.conn.commit()
+            self._conn().commit()
 
     def append_user(self, sid: str, content: str) -> None:
         with self._lock:
-            r = self.conn.execute(
+            r = self._conn().execute(
                 "SELECT COALESCE(MAX(round_no),0)+1 AS r FROM messages"
                 " WHERE session_id=?", (sid,)).fetchone()["r"]
-            self.conn.execute(
+            self._conn().execute(
                 "INSERT INTO messages(session_id, round_no, role, content,"
                 " active, created_at) VALUES(?,?,?,?,1,?)",
                 (sid, r, "user", content, _now()))
-            self.conn.commit()
+            self._conn().commit()
 
     def append_assistant(self, sid: str, content: str) -> None:
         with self._lock:
-            r = self.conn.execute(
+            r = self._conn().execute(
                 "SELECT COALESCE(MAX(round_no),1) AS r FROM messages"
                 " WHERE session_id=?", (sid,)).fetchone()["r"]
-            self.conn.execute(
+            self._conn().execute(
                 "INSERT INTO messages(session_id, round_no, role, content,"
                 " active, created_at) VALUES(?,?,?,?,1,?)",
                 (sid, r, "assistant", content, _now()))
-            self.conn.commit()
+            self._conn().commit()
 
     def active_messages(self, sid: str) -> list[dict]:
         with self._lock:
-            rows = self.conn.execute(
+            rows = self._conn().execute(
                 "SELECT role, content FROM messages WHERE session_id=?"
                 " AND active=1 ORDER BY id", (sid,)).fetchall()
             return [{"role": r["role"], "content": r["content"]} for r in rows]
 
     def max_active_round(self, sid: str) -> int:
         with self._lock:
-            return self.conn.execute(
+            return self._conn().execute(
                 "SELECT COALESCE(MAX(round_no),0) AS m FROM messages"
                 " WHERE session_id=? AND active=1", (sid,)).fetchone()["m"]
 
     def messages_upto(self, sid: str, cutoff: int) -> list[dict]:
         with self._lock:
-            rows = self.conn.execute(
+            rows = self._conn().execute(
                 "SELECT role, content FROM messages WHERE session_id=?"
                 " AND active=1 AND round_no<=? ORDER BY id",
                 (sid, cutoff)).fetchall()
@@ -120,10 +133,10 @@ class MemoryDB:
 
     def deactivate_upto(self, sid: str, cutoff: int) -> None:
         with self._lock:
-            self.conn.execute(
+            self._conn().execute(
                 "UPDATE messages SET active=0 WHERE session_id=? AND round_no<=?",
                 (sid, cutoff))
-            self.conn.commit()
+            self._conn().commit()
 
     # ---------- 长期记忆 ----------
     def add_memory(self, kind: str, content: str,
@@ -138,22 +151,22 @@ class MemoryDB:
             except Exception:
                 emb = None
         with self._lock:
-            if self.conn.execute(
+            if self._conn().execute(
                     "SELECT 1 FROM long_term_memories WHERE kind=? AND content=?",
                     (kind, content)).fetchone():
                 return  # 精确去重; 语义级去重记为债务
-            cur = self.conn.execute(
+            cur = self._conn().execute(
                 "INSERT INTO long_term_memories(kind, content, embedding,"
                 " source_session, created_at) VALUES(?,?,?,?,?)",
                 (kind, content, emb, source_session, _now()))
-            self.conn.execute(
+            self._conn().execute(
                 "INSERT INTO memory_fts(content, memory_id) VALUES(?,?)",
                 (content, cur.lastrowid))
-            self.conn.commit()
+            self._conn().commit()
 
     def list_memories(self, kind: str | None = None, limit: int = 50) -> list[dict]:
         with self._lock:
-            rows = self.conn.execute(
+            rows = self._conn().execute(
                 "SELECT kind, content FROM long_term_memories"
                 + (" WHERE kind=?" if kind else "")
                 + " ORDER BY id DESC LIMIT ?",
@@ -169,7 +182,7 @@ class MemoryDB:
             except Exception:
                 q_emb = None
         with self._lock:
-            rows = self.conn.execute(
+            rows = self._conn().execute(
                 "SELECT id, kind, content, embedding FROM long_term_memories"
             ).fetchall()
             if not rows:
@@ -184,7 +197,7 @@ class MemoryDB:
             tokens = re.findall(r"[\w\u4e00-\u9fff]+", query)[:8]
             if tokens:
                 try:
-                    hits = self.conn.execute(
+                    hits = self._conn().execute(
                         "SELECT m.kind, m.content FROM memory_fts f"
                         " JOIN long_term_memories m ON m.id=f.memory_id"
                         " WHERE memory_fts MATCH ? ORDER BY f.rank LIMIT ?",
@@ -193,7 +206,7 @@ class MemoryDB:
                         return [dict(r) for r in hits]
                 except sqlite3.OperationalError:
                     pass
-            hits = self.conn.execute(
+            hits = self._conn().execute(
                 "SELECT kind, content FROM long_term_memories"
                 " WHERE content LIKE ? LIMIT ?", (f"%{query[:40]}%", limit)).fetchall()
             return [dict(r) for r in hits]

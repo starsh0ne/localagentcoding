@@ -1,8 +1,8 @@
 # ============================================================
-# api/worker.py | v0.5 诞生（串行worker + 轮次注册表）
-# 并发模型(用户决策): chat可并发到达，排队串行执行。
-# 串行的硬约束: ①SQLite单写者 ②pip装同一venv(并行coder互相污染依赖)
-# 并行化前提: 多worker + 每任务独立venv(记为债务)
+# api/worker.py | v0.5 诞生(串行worker) → v1.0(并发 worker 池 + 可插拔队列)
+# 并发模型(v1.0): 单进程 N 个并发消费者协程, 每个 turn 在独立线程跑, 真正并行;
+#   队列可插拔(Memory/Redis, 见 api/queue.py)。HITL/沙箱阻塞仅占 1/N 槽。
+# 共享 venv: pip_install 已加全局锁防并发污染(真隔离留债务)。
 # ============================================================
 import asyncio
 import secrets
@@ -15,6 +15,7 @@ from datetime import datetime
 from agent_pro.agents import create_app_agent
 from agent_pro.api.bus import get_event_bus
 from agent_pro.config import get_settings
+from agent_pro.api.queue import get_turn_queue
 from agent_pro.api.state_store import get_state_store
 from agent_pro.memory.manager import SessionManager
 from agent_pro.observability import (context, get_logger, reset_cost_handler,
@@ -36,15 +37,14 @@ class Turn:
 
 class TurnWorker:
     def __init__(self):
-        self.queue: asyncio.Queue[Turn] = asyncio.Queue()
         self.turns: dict[str, Turn] = {}
 
-    def submit(self, session_id: str, message: str) -> Turn:
+    async def submit(self, session_id: str, message: str) -> Turn:
         turn = Turn(
             turn_id=f"turn-{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}",
             session_id=session_id, message=message)
         self.turns[turn.turn_id] = turn
-        self.queue.put_nowait(turn)
+        await get_turn_queue().put(asdict(turn))  # v1.0: 可插拔队列(内存/Redis)
         get_state_store().put_turn(asdict(turn))  # v0.9 持久化
         return turn
 
@@ -55,37 +55,66 @@ class TurnWorker:
         d = get_state_store().get_turn(turn_id)  # v0.9 重启恢复
         return Turn(**d) if d else None
 
-    async def run(self) -> None:
+    async def run(self, concurrency: int = 1) -> None:
+        """v1.0: 起 N 个并发消费者协程, 每个 turn 在独立线程跑, 真正并行执行
+        多 Agent 任务(此前为串行 1 个)。run 内部 gather 永不返回。"""
+        n = max(1, concurrency)
+        log.info("worker 启动", extra={"event_kind": "worker_start",
+                                       "concurrency": n})
+        consumers = [asyncio.create_task(self._consume(), name=f"worker-{i}")
+                     for i in range(n)]
+        await asyncio.gather(*consumers)
+
+    async def _consume(self) -> None:
+        queue = get_turn_queue()
         while True:
-            turn = await self.queue.get()
-            turn.status = "running"
-            get_state_store().update_turn(turn.turn_id, status="running")
-            log.info("turn 开始", extra={"turn_id": turn.turn_id,
-                                         "session_id": turn.session_id,
-                                         "event_kind": "turn_start"})
+            d = await queue.get()
             try:
-                await asyncio.to_thread(self._execute, turn)
-                turn.status = "done"
-                get_state_store().update_turn(turn.turn_id, status="done",
-                                             result=turn.result)
-                log.info("turn 完成", extra={"turn_id": turn.turn_id,
-                                             "session_id": turn.session_id,
-                                             "event_kind": "turn_done",
-                                             "status": "done"})
-            except Exception as e:  # 兜底: worker永不退出
-                turn.status = "error"
-                turn.error = f"{type(e).__name__}: {e}"
-                get_state_store().update_turn(turn.turn_id, status="error",
-                                             error=turn.error)
-                log.error("turn 异常", extra={"turn_id": turn.turn_id,
-                                              "session_id": turn.session_id,
-                                              "event_kind": "turn_error",
-                                              "error": turn.error},
-                          exc_info=e)
-                get_event_bus().publish(f"turn:{turn.turn_id}", "error",
-                                        {"error": turn.error})
-            finally:
-                self.queue.task_done()
+                turn = Turn(**d)
+            except Exception:
+                continue  # 畸形条目丢弃, 不卡消费者
+            self.turns.setdefault(turn.turn_id, turn)
+            await self._run_one(turn)
+
+    async def _run_one(self, turn: Turn) -> None:
+        turn.status = "running"
+        get_state_store().update_turn(turn.turn_id, status="running")
+        log.info("turn 开始", extra={"turn_id": turn.turn_id,
+                                     "session_id": turn.session_id,
+                                     "event_kind": "turn_start"})
+        try:
+            timeout = get_settings().turn_timeout_s
+            await asyncio.wait_for(asyncio.to_thread(self._execute, turn),
+                                  timeout=timeout)
+            turn.status = "done"
+            get_state_store().update_turn(turn.turn_id, status="done",
+                                         result=turn.result)
+            log.info("turn 完成", extra={"turn_id": turn.turn_id,
+                                         "session_id": turn.session_id,
+                                         "event_kind": "turn_done",
+                                         "status": "done"})
+        except asyncio.TimeoutError:
+            turn.status = "error"
+            turn.error = f"turn 超时(>{get_settings().turn_timeout_s}s)"
+            get_state_store().update_turn(turn.turn_id, status="error",
+                                         error=turn.error)
+            log.error("turn 超时", extra={"turn_id": turn.turn_id,
+                                          "event_kind": "turn_error",
+                                          "error": turn.error})
+            get_event_bus().publish(f"turn:{turn.turn_id}", "error",
+                                    {"error": turn.error})
+        except Exception as e:  # 兜底: 单个 turn 异常不退出消费者
+            turn.status = "error"
+            turn.error = f"{type(e).__name__}: {e}"
+            get_state_store().update_turn(turn.turn_id, status="error",
+                                         error=turn.error)
+            log.error("turn 异常", extra={"turn_id": turn.turn_id,
+                                          "session_id": turn.session_id,
+                                          "event_kind": "turn_error",
+                                          "error": turn.error},
+                      exc_info=e)
+            get_event_bus().publish(f"turn:{turn.turn_id}", "error",
+                                    {"error": turn.error})
 
     def _execute(self, turn: Turn) -> None:
         """同步执行一个轮次（工作线程内）: 记忆重建→agent流式→事件推送→压缩"""

@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
     if not get_settings().api_auth_key:
         raise RuntimeError("API_AUTH_KEY未配置 — 拒绝以空鉴权启动")
     get_event_bus().bind_loop(asyncio.get_running_loop())
-    worker_task = asyncio.create_task(get_worker().run())
+    worker_task = asyncio.create_task(get_worker().run(get_settings().worker_concurrency))
     cleanup_task = asyncio.create_task(_cleanup_loop())
     try:
         yield
@@ -93,7 +93,7 @@ async def chat(session_id: str, body: ChatBody, _: None = Depends(require_api_ke
     if created:
         log.info("惰性创建 session", extra={"event_kind": "session_create",
                                             "session_id": session_id})
-    turn = get_worker().submit(session_id, body.message.strip())
+    turn = await get_worker().submit(session_id, body.message.strip())
     return {"turn_id": turn.turn_id, "session_id": session_id, "status": turn.status}
 @app.get("/api/chat/turns/{turn_id}")
 async def turn_status(turn_id: str, _: None = Depends(require_api_key)):

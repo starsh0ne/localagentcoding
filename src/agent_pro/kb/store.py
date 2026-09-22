@@ -20,11 +20,16 @@ CANDIDATES = 20
 class KBStore:
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = db_path
         self._lock = threading.RLock()
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript("""
+        self._local = threading.local()  # v1.0: 每线程持有一个连接(连接复用)
+
+    def _new_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.executescript("""
         CREATE TABLE IF NOT EXISTS kb_chunks(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source TEXT NOT NULL, title TEXT NOT NULL,
@@ -34,40 +39,48 @@ class KBStore:
         CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(
             content, title, heading_path, chunk_id UNINDEXED);
         """)
-        self.conn.commit()
+        conn.commit()
+        return conn
+
+    def _conn(self) -> sqlite3.Connection:
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._new_conn()
+            self._local.conn = c
+        return c
 
     def replace_source(self, source: str, title: str,
                        chunks: list[tuple[str, str, str | None]]) -> int:
         """单文档全量替换(旧块删除后插入), 幂等可重跑; 返回块数"""
         with self._lock:
-            for r in self.conn.execute(
+            for r in self._conn().execute(
                     "SELECT id FROM kb_chunks WHERE source=?", (source,)).fetchall():
-                self.conn.execute("DELETE FROM kb_fts WHERE chunk_id=?", (r["id"],))
-            self.conn.execute("DELETE FROM kb_chunks WHERE source=?", (source,))
+                self._conn().execute("DELETE FROM kb_fts WHERE chunk_id=?", (r["id"],))
+            self._conn().execute("DELETE FROM kb_chunks WHERE source=?", (source,))
             for idx, (heading, content, emb) in enumerate(chunks):
-                cur = self.conn.execute(
+                cur = self._conn().execute(
                     "INSERT INTO kb_chunks(source, title, heading_path, chunk_index,"
                     " content, embedding) VALUES(?,?,?,?,?,?)",
                     (source, title, heading, idx, content, emb))
-                self.conn.execute(
+                self._conn().execute(
                     "INSERT INTO kb_fts(content, title, heading_path, chunk_id)"
                     " VALUES(?,?,?,?)", (content, title, heading, cur.lastrowid))
-            self.conn.commit()
+            self._conn().commit()
             return len(chunks)
 
     def purge_all(self) -> None:
         with self._lock:
-            self.conn.execute("DELETE FROM kb_chunks")
-            self.conn.execute("DELETE FROM kb_fts")
-            self.conn.commit()
+            self._conn().execute("DELETE FROM kb_chunks")
+            self._conn().execute("DELETE FROM kb_fts")
+            self._conn().commit()
 
     def stats(self) -> dict:
         with self._lock:
-            docs = self.conn.execute(
+            docs = self._conn().execute(
                 "SELECT COUNT(DISTINCT source) AS n FROM kb_chunks").fetchone()["n"]
-            total = self.conn.execute(
+            total = self._conn().execute(
                 "SELECT COUNT(*) AS n FROM kb_chunks").fetchone()["n"]
-            emb = self.conn.execute(
+            emb = self._conn().execute(
                 "SELECT COUNT(*) AS n FROM kb_chunks"
                 " WHERE embedding IS NOT NULL").fetchone()["n"]
         return {"documents": docs, "chunks": total, "embedded_chunks": emb,
@@ -85,7 +98,7 @@ class KBStore:
         with self._lock:
             vec_ids: list[int] = []
             if q_emb:
-                rows = self.conn.execute(
+                rows = self._conn().execute(
                     "SELECT id, embedding FROM kb_chunks"
                     " WHERE embedding IS NOT NULL").fetchall()
                 scored = [(r["id"], cosine(q_emb, json.loads(r["embedding"])))
@@ -97,7 +110,7 @@ class KBStore:
             if tokens:
                 try:
                     fts_q = " OR ".join(f'"{t}"' for t in tokens)
-                    fts_ids = [r["chunk_id"] for r in self.conn.execute(
+                    fts_ids = [r["chunk_id"] for r in self._conn().execute(
                         "SELECT chunk_id FROM kb_fts WHERE kb_fts MATCH ?"
                         " ORDER BY rank LIMIT ?",
                         (fts_q, CANDIDATES)).fetchall()]
@@ -112,7 +125,7 @@ class KBStore:
                 fused[cid] = fused.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
             result = []
             for cid, _ in sorted(fused.items(), key=lambda x: -x[1])[:limit]:
-                row = self.conn.execute(
+                row = self._conn().execute(
                     "SELECT source, title, heading_path, content"
                     " FROM kb_chunks WHERE id=?", (cid,)).fetchone()
                 if row:

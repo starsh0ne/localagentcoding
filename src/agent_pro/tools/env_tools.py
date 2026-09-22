@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from langchain.tools import tool
 
 _SPEC_RE = re.compile(
@@ -20,6 +21,9 @@ _SPEC_RE = re.compile(
 PIP_TIMEOUT_S = 300
 MAX_PKGS = 20
 MAX_OUTPUT_CHARS = 2000
+# v1.0: 共享 venv 下, 串行化安装以防火并行 coder 互相污染/损坏环境
+# (真隔离留作 per-task venv 债务)
+_PIP_LOCK = threading.Lock()
 
 
 @tool
@@ -39,15 +43,16 @@ def pip_install(packages: str) -> str:
         if shutil.which("uv")
         else [sys.executable, "-m", "pip", "install", *pkgs]
     )
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S
-        )
-        out = (proc.stdout + "\n" + proc.stderr).strip()
-        if len(out) > MAX_OUTPUT_CHARS:
-            out = "…" + out[-MAX_OUTPUT_CHARS:]
-        return f"exit_code={proc.returncode}\n{out}"
-    except subprocess.TimeoutExpired:
-        return f"错误: 安装超时(>{PIP_TIMEOUT_S}s)，可重试或检查包名/网络"
-    except OSError as e:
-        return f"错误: 无法执行安装命令: {type(e).__name__}: {e}"
+    with _PIP_LOCK:
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S
+            )
+            out = (proc.stdout + "\n" + proc.stderr).strip()
+            if len(out) > MAX_OUTPUT_CHARS:
+                out = "…" + out[-MAX_OUTPUT_CHARS:]
+            return f"exit_code={proc.returncode}\n{out}"
+        except subprocess.TimeoutExpired:
+            return f"错误: 安装超时(>{PIP_TIMEOUT_S}s)，可重试或检查包名/网络"
+        except OSError as e:
+            return f"错误: 无法执行安装命令: {type(e).__name__}: {e}"

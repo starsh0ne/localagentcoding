@@ -1,0 +1,50 @@
+[
+  {
+    "question": "我们团队的 Python 编码规范里，对函数签名的类型注解有什么要求？",
+    "expected_source": "coding.md"
+  },
+  {
+    "question": "项目依赖统一用什么工具管理？为什么不用 requirements.txt？",
+    "expected_source": "coding.md"
+  },
+  {
+    "question": "Python 编码规范里，模块名、类名、常量分别应该怎么命名？",
+    "expected_source": "coding.md"
+  },
+  {
+    "question": "我们 Python 项目要求用 uv 还是 pip 管理依赖？",
+    "expected_source": "coding.md"
+  },
+  {
+    "question": "什么是 LLMOps？企业落地大模型应用后通常会遇到哪些运维问题？",
+    "expected_source": "企业级大模型运维（LLMOps）架构深度实践.md"
+  },
+  {
+    "question": "企业级 LLM 平台总体架构里，AI Gateway 主要负责什么职责？",
+    "expected_source": "企业级大模型运维（LLMOps）架构深度实践.md"
+  },
+  {
+    "question": "文中提到的高性能推理架构是哪两个技术组合？",
+    "expected_source": "企业级大模型运维（LLMOps）架构深度实践.md"
+  },
+  {
+    "question": "全栈监控体系包含哪几层？举几个具体组件例子。",
+    "expected_source": "企业级大模型运维（LLMOps）架构深度实践.md"
+  },
+  {
+    "question": "模型生命周期管理用了什么工具做微调训练？",
+    "expected_source": "企业级大模型运维（LLMOps）架构深度实践.md"
+  },
+  {
+    "question": "Agent 与 RAG 的可观测性和评估在 LLMOps 架构里属于哪一部分？",
+    "expected_source": "企业级大模型运维（LLMOps）架构深度实践.md"
+  },
+  {
+    "question": "生产环境的成本优化与延迟控制，是 LLMOps 架构的哪块目标？",
+    "expected_source": "企业级大模型运维（LLMOps）架构深度实践.md"
+  },
+  {
+    "question": "为什么企业不能只关注模型能力本身，还要做 LLMOps？",
+    "expected_source": "企业级大模型运维（LLMOps）架构深度实践.md"
+  }
+]

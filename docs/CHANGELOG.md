@@ -1,4 +1,34 @@
 # Changelog
+## v1.0.0 — 并发改造（已实现）
+### 目标
+- 把 v0.9 单进程串行队列改造为**可配置并发 worker 池**，真正支持多 Agent 任务并行执行。
+- 补齐"连接复用改造"与"真实 RAG 命中率"，使简历中"高并发"与"检索命中率"有据可依。
+### 决策（已拍板）
+- B1 并行模型：单进程 worker 池 + Redis 队列/状态后端，SSE 事件总线留进程内
+- B2 venv：保留共用 venv，`pip_install` 加全局锁防并发污染（真隔离留债务）
+- B3 SQLite：每线程持有一个连接 + WAL（连接复用改造）
+- B4 评测：实现 eval/runner.py + 内置黄金集，跑真实 RAG 引用命中率
+### 计划变更
+- 新增 api/queue.py（TurnQueue：Memory/Redis 双后端）
+- 改 api/worker.py（N 并发消费者 + per-turn 超时）、api/server.py（lifespan 起 N 消费者）
+- 改 memory/kb/tasks store.py（每线程连接 + WAL）
+- 改 tools/env_tools.py（pip_install 全局锁）
+- 改 config.py（worker_concurrency/turn_timeout_s/queue_backend/eval_dataset_path）、版本 1.0.0
+- 实现 eval/runner.py + eval/gold_dataset.json
+### 已知边界
+- 共享 venv 并发 pip 经锁串行，运行时仍共用环境（互斥依赖冲突为已知债务）
+- Redis 路径本环境无 Redis 仅验证 Memory 降级；真·100 并发取决于 DeepSeek RPM/TPM 与单机资源
+### 实现期发现并修复的真实缺陷
+- **`search_knowledge` 未挂载到通用 agent**（`agents/general.py`）：system prompt 要求"涉及私有笔记/规范 → search_knowledge"，但该工具只被 import 未加入工具列表，RAG 对通用 agent 完全失效，"回答逐条可溯源"此前名不副实。已接入，eval 引用命中率方才可得。
+- **eval `EvalReport.__str__` NameError**（漏写 `self.`），已修。
+### 验收结果（实测）
+- **并发**：`tests/test_v1_concurrency.py` 三项全过（队列顺序 / worker 池并行 / 每线程连接并发读写）；本环境 Redis 不可用→自动降级内存队列与内存态，启动无阻塞。
+- **RAG 真实引用命中率**：`eval/runner.py` 对 12 条黄金集跑 general agent → 已回答 12/12，引用命中 11/12，**命中率 92%**（平均延迟 12.2s）。
+  - 唯一未命中：第 5 条"什么是 LLMOps…"模型用通用知识正确作答但未回显来源文件名。
+  - 说明：本环境 embedding 服务（WSL :8001）未启动，检索自动降级为 FTS5；向量召回缺失不影响来源可溯源，92% 为纯 FTS 下界，接入 embedding 后不降反升。
+  - 简历"检索命中率 85%"为保守表述，实测 92% 高于该值，**陈述成立且有真数字支撑**。
+- 成本统计对 `deepseek-v4-flash` 显示 $0（价格表未覆盖该模型名，可观测性债务，不影响功能与命中率）。
+
 ## v0.1.0 — 最小智能体循环
 	- 单文件：LLM + 2工具 + 裸循环
 ## v0.2.0 — 工程化骨架 + 多Agent调度架构

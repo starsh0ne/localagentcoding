@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # v0.7: 可观测性(结构化日志)
     log_level: str = "INFO"          # DEBUG/INFO/WARNING/ERROR
     log_dir: Path = Path("./logs")   # 日志落盘目录(运行时产物，已 gitignore)
+    # v1.0: 并发 worker 池
+    worker_concurrency: int = 4      # 同时执行的 turn 数(>1 即并行; 资源/LLM配额够可上 100)
+    turn_timeout_s: int = 600        # 单 turn 整体超时(防长任务占槽)
+    queue_backend: str = "auto"      # auto(默认, Redis 可用则用) / redis / memory
+    # v1.0: 评测数据集路径
+    eval_dataset_path: Path = Path("./eval/gold_dataset.json")
 
 
 @lru_cache
