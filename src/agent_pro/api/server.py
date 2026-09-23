@@ -13,9 +13,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from agent_pro import __version__
 from agent_pro.api.bus import get_event_bus
+from agent_pro.api.queue import QueueFullError
 from agent_pro.api.worker import get_worker
 from agent_pro.config import get_settings
 from agent_pro.memory.store import get_memory_db
@@ -35,7 +36,8 @@ async def require_api_key(x_api_key: str | None = Header(default=None, alias="X-
     if x_api_key != get_settings().api_auth_key:
         raise HTTPException(status_code=401, detail="invalid api key")
 class ChatBody(BaseModel):
-    message: str
+    message: str = Field(..., max_length=100_000,
+                         description="用户消息(≤100KB)")
 
 
 class ApproveBody(BaseModel):
@@ -86,6 +88,8 @@ async def new_session(_: None = Depends(require_api_key)):
             f"s-{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"}
 @app.post("/api/sessions/{session_id}/chat")
 async def chat(session_id: str, body: ChatBody, _: None = Depends(require_api_key)):
+    if len(session_id) > 128:
+        raise HTTPException(status_code=400, detail="session_id 过长(≤128)")
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="message不能为空")
     # v0.9(#29): 惰性创建 session — 不存在则建(返回是否新建用于日志), 不再静默用任意字符串
@@ -93,7 +97,11 @@ async def chat(session_id: str, body: ChatBody, _: None = Depends(require_api_ke
     if created:
         log.info("惰性创建 session", extra={"event_kind": "session_create",
                                             "session_id": session_id})
-    turn = await get_worker().submit(session_id, body.message.strip())
+    try:
+        turn = await get_worker().submit(session_id, body.message.strip())
+    except QueueFullError:
+        # 背压: 队列已满, 拒绝新增提交(防内存无限增长)
+        raise HTTPException(status_code=429, detail="队列已满，请稍后重试")
     return {"turn_id": turn.turn_id, "session_id": session_id, "status": turn.status}
 @app.get("/api/chat/turns/{turn_id}")
 async def turn_status(turn_id: str, _: None = Depends(require_api_key)):

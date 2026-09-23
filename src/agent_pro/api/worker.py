@@ -15,13 +15,21 @@ from datetime import datetime
 from agent_pro.agents import create_app_agent
 from agent_pro.api.bus import get_event_bus
 from agent_pro.config import get_settings
-from agent_pro.api.queue import get_turn_queue
+from agent_pro.api.queue import QueueFullError, TurnQueue, get_turn_queue
 from agent_pro.api.state_store import get_state_store
 from agent_pro.memory.manager import SessionManager
 from agent_pro.observability import (context, get_logger, reset_cost_handler,
                                      set_cost_handler, TokenUsageCallbackHandler)
 
 log = get_logger("worker")
+
+
+def client_safe_error(turn_id: str, e: Exception) -> str:
+    """对外(客户端/SSE)安全的错误文案: 不泄露内部路径/堆栈/模块名等细节,
+    仅留追踪码供服务端日志定位。详情已通过 exc_info 落日志。"""
+    if isinstance(e, asyncio.TimeoutError):
+        return f"turn 超时(>{get_settings().turn_timeout_s}s)"
+    return f"任务执行失败（追踪码 {turn_id}，详情见服务端日志）"
 
 
 @dataclass
@@ -38,22 +46,35 @@ class Turn:
 class TurnWorker:
     def __init__(self):
         self.turns: dict[str, Turn] = {}
+        self._turns_lock = threading.Lock()  # v1.0: turns 字典跨线程(提交/查询/回收)保护
 
     async def submit(self, session_id: str, message: str) -> Turn:
         turn = Turn(
             turn_id=f"turn-{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}",
             session_id=session_id, message=message)
-        self.turns[turn.turn_id] = turn
-        await get_turn_queue().put(asdict(turn))  # v1.0: 可插拔队列(内存/Redis)
+        with self._turns_lock:
+            self.turns[turn.turn_id] = turn
+        try:
+            await get_turn_queue().put(asdict(turn))  # v1.0: 可插拔队列(内存/Redis)
+        except Exception as e:  # 队列满(背压)等 → 转 429 由 server 捕获
+            with self._turns_lock:
+                self.turns.pop(turn.turn_id, None)
+            raise e
         get_state_store().put_turn(asdict(turn))  # v0.9 持久化
         return turn
 
     def get(self, turn_id: str) -> Turn | None:
-        t = self.turns.get(turn_id)
+        with self._turns_lock:
+            t = self.turns.get(turn_id)
         if t is not None:
             return t
         d = get_state_store().get_turn(turn_id)  # v0.9 重启恢复
         return Turn(**d) if d else None
+
+    def _archive(self, turn_id: str) -> None:
+        """完成后从内存剔除(历史改查 state_store), 防长服务内存泄漏。"""
+        with self._turns_lock:
+            self.turns.pop(turn_id, None)
 
     async def run(self, concurrency: int = 1) -> None:
         """v1.0: 起 N 个并发消费者协程, 每个 turn 在独立线程跑, 真正并行执行
@@ -66,19 +87,41 @@ class TurnWorker:
         await asyncio.gather(*consumers)
 
     async def _consume(self) -> None:
+        """自愈外层: 消费者意外退出(如队列后端瞬时故障)后自动重启, 不丢整体服务。"""
         queue = get_turn_queue()
         while True:
-            d = await queue.get()
+            try:
+                await self._consume_inner(queue)
+            except Exception as e:
+                log.error("消费者异常退出·1s 后重启", extra={
+                    "event_kind": "worker_crash", "error": str(e)}, exc_info=e)
+                await asyncio.sleep(1)
+
+    async def _consume_inner(self, queue: TurnQueue) -> None:
+        while True:
+            try:
+                d = await queue.get()
+            except Exception as e:  # 队列后端瞬时故障(如 Redis 断连)
+                log.error("队列读取异常·重试", extra={
+                    "event_kind": "queue_get_error", "error": str(e)}, exc_info=e)
+                await asyncio.sleep(1)
+                continue
             try:
                 turn = Turn(**d)
             except Exception:
                 continue  # 畸形条目丢弃, 不卡消费者
-            self.turns.setdefault(turn.turn_id, turn)
+            with self._turns_lock:
+                self.turns.setdefault(turn.turn_id, turn)
             await self._run_one(turn)
+            self._archive(turn.turn_id)  # 完成即回收内存
 
     async def _run_one(self, turn: Turn) -> None:
         turn.status = "running"
-        get_state_store().update_turn(turn.turn_id, status="running")
+        try:  # 前置状态写失败不应击杀消费者(降级为日志告警)
+            get_state_store().update_turn(turn.turn_id, status="running")
+        except Exception as e:
+            log.warning("状态更新失败(running)", extra={
+                "turn_id": turn.turn_id, "error": str(e)}, exc_info=e)
         log.info("turn 开始", extra={"turn_id": turn.turn_id,
                                      "session_id": turn.session_id,
                                      "event_kind": "turn_start"})
@@ -95,7 +138,7 @@ class TurnWorker:
                                          "status": "done"})
         except asyncio.TimeoutError:
             turn.status = "error"
-            turn.error = f"turn 超时(>{get_settings().turn_timeout_s}s)"
+            turn.error = client_safe_error(turn.turn_id, asyncio.TimeoutError())
             get_state_store().update_turn(turn.turn_id, status="error",
                                          error=turn.error)
             log.error("turn 超时", extra={"turn_id": turn.turn_id,
@@ -105,14 +148,14 @@ class TurnWorker:
                                     {"error": turn.error})
         except Exception as e:  # 兜底: 单个 turn 异常不退出消费者
             turn.status = "error"
-            turn.error = f"{type(e).__name__}: {e}"
+            turn.error = client_safe_error(turn.turn_id, e)  # 对外脱敏
             get_state_store().update_turn(turn.turn_id, status="error",
                                          error=turn.error)
             log.error("turn 异常", extra={"turn_id": turn.turn_id,
                                           "session_id": turn.session_id,
                                           "event_kind": "turn_error",
-                                          "error": turn.error},
-                      exc_info=e)
+                                          "error": str(e)},
+                      exc_info=e)  # 原始异常仅落日志
             get_event_bus().publish(f"turn:{turn.turn_id}", "error",
                                     {"error": turn.error})
 

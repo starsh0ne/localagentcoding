@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     worker_concurrency: int = 4      # 同时执行的 turn 数(>1 即并行; 资源/LLM配额够可上 100)
     turn_timeout_s: int = 600        # 单 turn 整体超时(防长任务占槽)
     queue_backend: str = "auto"      # auto(默认, Redis 可用则用) / redis / memory
+    queue_maxsize: int = 1000        # 队列上限(背压): 满则提交返回 429, 防内存无限增长
     # v1.0: 评测数据集路径
     eval_dataset_path: Path = Path("./eval/gold_dataset.json")
 

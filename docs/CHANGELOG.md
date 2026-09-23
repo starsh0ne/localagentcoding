@@ -1,4 +1,27 @@
 # Changelog
+## v1.0.1 — 生产就绪加固（P0/P1 完善）
+### 目标
+- v1.0.0 架构就绪后，堵上**上线前必须处理**的稳定性/安全细节，达到可上线（单节点/局域网）标准，并补齐文档。
+### 决策（已拍板）
+- 范围：完整 P0（稳定性/安全）+ P1（测试/可观测/文档），不做大功能。
+- 死代码：删除确认无引用的 7 个 TODO 空壳文件（registry/memory_tools/task_tools/errors/core/prompts/tracing），保持仓库干净。
+### 计划变更
+- **P0-稳定性**
+  - api/worker.py：① `turns` 字典加锁跨线程保护 + 完成后从内存剔除（**防长服务内存泄漏**，历史改查 state_store）；② 消费者自愈（意外退出 1s 后重启，不死整体服务）；③ 前置状态写失败降级为告警不击杀消费者。
+  - api/queue.py + config：`QUEUE_MAXSIZE`（默认 1000）背压，满则抛 `QueueFullError`；server 捕获返回 **429**。
+  - api/server.py：消息体 `max_length=100_000`（超 422）；`session_id` 长度 ≤128（超 400）。
+  - api/worker.py：对外错误文案**脱敏**（`client_safe_error`），不含内部路径/堆栈，仅留追踪码；原始异常仅落日志。
+- **P1**
+  - tests/test_security.py：沙箱穿越拦截 / pip 白名单 / API 鉴权 401 / 队列背压 / 错误脱敏 / turn 回收 等 13 项回归。
+  - eval/runner.py：修复成本始终为 0 的 bug（按模型聚合 `estimated_cost_usd`）；未知模型价显示 `N/A`。
+  - README.md：安装/启动/使用/评测/生产部署/安全模型/Git 发布流程与版本规范。
+### 删除（确认无引用）
+- src/agent_pro/agents/core.py、agents/prompts.py、observability/tracing.py、tools/registry.py、tools/errors.py、tools/memory_tools.py、tools/task_tools.py。
+### 验收结果（实测）
+- 安全/并发回归：pytest 全绿（`test_v1_concurrency.py` 3 项 + `test_security.py` 13 项）。
+- 服务冒测（TestClient，Memory 后端）：`/health` 200；缺头/错头 401；正确 key 200；超长 message 422；队列自动降级内存、启动无阻塞。
+- `pip_install` 白名单拦 `-e`/`--index-url`/命令注入；`WorkspaceSandbox` 拦绝对路径与 `../` 穿越。
+
 ## v1.0.0 — 并发改造（已实现）
 ### 目标
 - 把 v0.9 单进程串行队列改造为**可配置并发 worker 池**，真正支持多 Agent 任务并行执行。

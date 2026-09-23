@@ -17,6 +17,10 @@ log = get_logger("queue")
 QUEUE_KEY = "agent_pro:turn_queue"
 
 
+class QueueFullError(Exception):
+    """队列已达上限(背压): 提交方应据此返回 429。"""
+
+
 class TurnQueue:
     """turn 队列抽象。put/get 传 dict。"""
 
@@ -28,13 +32,16 @@ class TurnQueue:
 
 
 class MemoryTurnQueue(TurnQueue):
-    """进程内 asyncio.Queue（无界）。行为同 v0.9，重启即丢。"""
+    """进程内 asyncio.Queue（可设上限做背压）。重启即丢。"""
 
-    def __init__(self) -> None:
-        self._q: asyncio.Queue[dict] = asyncio.Queue()
+    def __init__(self, maxsize: int = 0) -> None:
+        self._q: asyncio.Queue[dict] = asyncio.Queue(maxsize=maxsize)
 
     async def put(self, item: dict) -> None:
-        self._q.put_nowait(item)
+        try:
+            self._q.put_nowait(item)
+        except asyncio.QueueFull:
+            raise QueueFullError("队列已满，请稍后重试")
 
     async def get(self) -> dict:
         return await self._q.get()
@@ -43,12 +50,19 @@ class MemoryTurnQueue(TurnQueue):
 class RedisTurnQueue(TurnQueue):
     """Redis list 队列: put=rpush, get=brpop(阻塞, 线程内)。重启可恢复。"""
 
-    def __init__(self, redis_client: Any, key: str = QUEUE_KEY) -> None:
+    def __init__(self, redis_client: Any, key: str = QUEUE_KEY,
+                 maxsize: int = 0) -> None:
         self._r = redis_client
         self._key = key
+        self._maxsize = maxsize
 
     async def put(self, item: dict) -> None:
         payload = json.dumps(item, ensure_ascii=False)
+        if self._maxsize > 0:
+            # 长度检查在线程内做, 与 rpush 之间有竞态但仅用于背压(非精确)
+            cur = await asyncio.to_thread(self._r.llen, self._key)
+            if cur >= self._maxsize:
+                raise QueueFullError("队列已满，请稍后重试")
         await asyncio.to_thread(self._r.rpush, self._key, payload)
 
     async def get(self) -> dict:
@@ -90,15 +104,16 @@ def get_turn_queue() -> TurnQueue:
             return _queue
         s = get_settings()
         backend = (s.queue_backend or "auto").lower()
+        maxsize = max(0, s.queue_maxsize)
         if backend == "memory":
-            _queue = MemoryTurnQueue()
+            _queue = MemoryTurnQueue(maxsize=maxsize)
             log.info("队列后端: 内存(asyncio.Queue)", extra={
-                "event_kind": "turn_queue", "backend": "memory"})
+                "event_kind": "turn_queue", "backend": "memory", "maxsize": maxsize})
             return _queue
         # auto / redis 都尝试 Redis
         r = _build_redis() if backend in ("auto", "redis") else None
         if r is not None:
-            _queue = RedisTurnQueue(r)
+            _queue = RedisTurnQueue(r, maxsize=maxsize)
             log.info("队列后端: Redis(持久化+重启可恢复)", extra={
                 "event_kind": "turn_queue", "backend": "redis", "key": QUEUE_KEY})
         else:

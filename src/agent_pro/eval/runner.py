@@ -41,9 +41,11 @@ class EvalReport:
     items: list = field(default_factory=list)
 
     def __str__(self) -> str:
+        cost = (f"${self.total_cost_usd:.4f}"
+                if self.total_cost_usd > 0 else "N/A(未知模型价/免费)")
         return (f"[Eval] 共{self.total}条 | 已回答{self.answered} | "
                 f"引用命中{self.citation_hits} | 引用命中率{self.citation_hit_rate:.0%} | "
-                f"平均延迟{self.avg_latency_s:.1f}s | 成本${self.total_cost_usd:.4f}")
+                f"平均延迟{self.avg_latency_s:.1f}s | 成本{cost}")
 
 
 def load_dataset(path) -> list[EvalItem]:
@@ -86,13 +88,16 @@ def run_one(item: EvalItem) -> dict:
     blob = "\n".join(str(getattr(m, "content", "")) for m in msgs)
     cited = item.expected_source in blob
     summary = cost.summary()
+    # 成本: 按模型聚合 estimated_cost_usd(未知模型价为 None→计 0)
+    cost_usd = sum((m.get("estimated_cost_usd") or 0.0)
+                   for m in summary.get("by_model", {}).values())
     return {
         "question": item.question,
         "expected_source": item.expected_source,
         "answered": bool(answer and answer != "(无输出)"),
         "cited": cited,
         "latency_s": round(duration, 2),
-        "cost_usd": float(summary.get("total_cost_usd", 0.0) or 0.0),
+        "cost_usd": round(cost_usd, 6),
         "answer_preview": answer[:200],
     }
 

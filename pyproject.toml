@@ -1,6 +1,6 @@
 [project]
 name = "agent-pro"
-version = "1.0.0"
+version = "1.0.1"
 description = "分阶段自研 Agent 应用 (v0.1 → v1.0，生产就绪并发改造)"
 readme = "docs/CHANGELOG.md"
 requires-python = ">=3.10"
