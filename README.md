@@ -136,6 +136,14 @@ uv run python main.py --new        # 新会话
 uv run python main.py --session <id>   # 续聊
 ```
 
+CLI 同样支持 coder 的**交付前自验**：专家调用 `request_verification` 时，终端内会打印
+待执行的命令、执行目录与说明，输入 `y` 才在 **WSL2 沙箱**执行并把真实输出回填给专家；
+直接回车即拒绝（默认拒绝），此时专家交付现状而不编造运行结果。API 模式下由
+`POST /api/turns/{id}/approve` 承担同一审批。
+
+> 执行目录有硬校验：`cwd_win` 必须落在 `WORKSPACE_DIR` 边界内，越界直接拒绝、不进入审批。
+> 自验需要 WSL2（`wsl.exe`）可用；缺失时明确拒绝执行，绝不回退宿主机。
+
 ---
 
 ## 八、使用（curl 示例）
@@ -201,7 +209,7 @@ uv run python -m agent_pro.eval.runner
 - **鉴权**：`X-API-Key` fail-closed；空 `API_AUTH_KEY` 拒绝启动；缺头/错头均 401。
 - **文件沙箱**：所有工作区路径经 `WorkspaceSandbox.resolve_safe` 校验，拦截绝对路径、`../` 穿越、符号链接逃逸。
 - **依赖安装**：`pip_install` 用列表参数（无 shell）、包名正则白名单（拦 `-e`/`--index-url`/注入）、数量/超时/输出截断。
-- **代码执行**：经 HITL 审批后在 **WSL2** 隔离执行，超时强杀；绝不在宿主机静默执行。
+- **代码执行**：经 HITL 审批后在 **WSL2** 隔离执行，超时强杀；绝不在宿主机静默执行。执行目录经工作区边界硬校验（`cwd_win` 越界直接拒绝）。
 - **信息脱敏**：对外错误文案不含内部路径/堆栈，仅留追踪码，详情落服务端日志。
 - **SQL**：全部参数化，无注入面。
 

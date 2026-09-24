@@ -25,3 +25,14 @@ class WorkspaceSandbox:
         if not candidate.is_relative_to(self.root):
             raise SandboxViolation(f"路径越界(仅允许工作区内相对路径): {rel_path}")
         return candidate
+
+    def resolve_abs_safe(self, abs_path: str | Path) -> Path:
+        """校验并解析**绝对**路径，返回绝对 Path；越界抛 SandboxViolation。
+
+        用于 cwd_win 这类由 LLM 直接给出的绝对执行目录(不像文件工具走相对路径,
+        故不能复用 resolve_safe —— 那边 (root / 绝对路径) 会直接替换成入参)。
+        """
+        candidate = Path(abs_path).expanduser().resolve()
+        if not candidate.is_relative_to(self.root):
+            raise SandboxViolation(f"路径越界(仅允许工作区内): {abs_path}")
+        return candidate

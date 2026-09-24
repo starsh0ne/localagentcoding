@@ -1,4 +1,63 @@
 # Changelog
+## v1.0.2 — 配置契约修复 + CLI 自验打通
+### 目标
+- 修复"严格按 README §五 / `.env.example` 配置反而无法启动"的配置契约缺陷。
+- 让 **CLI 模式**也能真正执行 coder 交付前自验（此前只有 API 模式存在审批入口）。
+### 决策（已拍板）
+- **配置命名：改代码兼容文档**，而非改文档迁就代码 —— 字段加 `AliasChoices`，同时接受
+  `OPENAI_API_KEY`/`OPENAI_BASE_URL` 与裸名 `API_KEY`/`BASE_URL`，文档与老写法都不用动。
+- **CLI 自验不引入额外审批服务**：`request_verification` 按运行模式分流，CLI 走终端 y/N
+  确认；审批语义与 API 一致（默认拒绝，只有显式确认才放行）。
+- **LLM 给出的执行目录视为不可信输入**：加工作区边界硬校验，而非继续只靠提示词约束。
+- **本次不夹带 lint 清理**：`ruff check src` 的既有告警另开提交处理，保持 v1.0.2 的 diff
+  只含缺陷修复（`--fix` 会自动重写 48 处未验证代码，混进来会把本次修复淹掉）。
+### 计划变更
+- `config.py`：`api_key`/`base_url` 加 `validation_alias=AliasChoices(...)`
+- `tools/verify_tools.py`：+CLI 终端审批路径；+`resolve_sandbox_cwd()` 执行目录硬校验；工具描述去掉硬编码示例路径
+- `tools/sandbox.py`：+`WorkspaceSandbox.resolve_abs_safe()`（原 `resolve_safe()` 语义是相对路径，不能用于 LLM 直给的绝对目录）
+- `agents/coder.py`：工作区解析为绝对路径并注入 system prompt【本次任务工作区】
+- `README.md`：§七.2 补 CLI 自验说明；§十一 代码执行补执行目录硬校验
+- `.env` / `.env.example`：注释重复的 `EMBEDDING_MODEL`；`EVAL_DATASET_PATH` 由目录改为 `./eval/gold_dataset.json`；注释 4 个无对应字段的死键
+- 新增 `tests/test_config.py`（配置命名契约回归）、`tests/test_verify_guard.py`（执行目录守卫回归）
+- 版本: `1.0.1` → `1.0.2`
+### 实现期发现并修复的真实缺陷
+- **按文档配置无法启动**：`config.py` 字段名是 `api_key`/`base_url`，而 README §五 与
+  `.env.example` 文档化的是 `OPENAI_API_KEY`/`OPENAI_BASE_URL`。pydantic-settings **只按字段名
+  精确匹配环境变量**（`_get_alias_names`：无 alias 时候选名只有字段名本身），故照文档配置必然
+  `ValidationError: api_key Field required`；`base_url` 取不到则 `ChatOpenAI` 退回默认网关，
+  请求打到 `api.openai.com` 返 **401**。附带确认：pydantic-settings 只把 `.env` 的值交给
+  `Settings`，**不写入 `os.environ`**，因此 openai SDK 自身的 `OPENAI_BASE_URL` 兜底也不会生效。
+- **CLI 自验实际只有"拒绝"一条路**：`turn_id` 仅在 `api/worker.py` 的 `context(...)` 中绑定，
+  `main.py` 不传；且审批唯一入口是 `POST /api/turns/{id}/approve`，CLI 不启动服务故不可达 ——
+  coder 调 `request_verification` 只会得到"当前不在轮次上下文中(API 模式才支持审批)"。
+- **相对工作区在 WSL 里失效**：`wsl_exec._win_to_wsl` 对没有盘符的路径**原样透传**，
+  `./workspace` 会变成 WSL 里的 `cd ./workspace`（相对 WSL 家目录），命令根本不在工作区执行。
+- **执行目录此前无硬校验**：README §十一 声称"命令必须限定在工作区内"，实际只停留在提示词层面。
+- **`.env` 重复定义 `EMBEDDING_MODEL`**：dotenv 对同名键**后者生效**，覆盖掉 v0.4 区块的空值 →
+  embedding 被意外启用，拿 LLM 的 key 去打 `api.openai.com`（401），反而不按注释降级纯 FTS5。
+- **`EVAL_DATASET_PATH` 指向目录**：`eval/runner.py` 直接 `read_text()` + `json.loads`，
+  跑评测必然报错。
+### 验收结果（实测）
+- `uv run pytest -q`：**全部通过** —— 16 项既有回归 + `tests/test_config.py` 5 项 +
+  `tests/test_verify_guard.py` 5 项。
+- **CLI 自验链路已实测通过**：coder 生成代码 → `request_verification` 弹出终端审批（命令/目录/说明）
+  → 输入 `y` → 经 **WSL2 沙箱真实执行**并回填 stdout 与退出码。
+- `uv run python -m agent_pro.eval.runner`：`EVAL_DATASET_PATH` 修正后**通过** —— 可正常
+  读取黄金集并跑完评测（原值指向目录，`read_text()` 会直接失败）。
+### 已知边界
+- `.env` 的 `MODEL_NAME='deepseek-flash'` 与历史记录中的 `deepseek-v4-flash` 不一致，且未登记
+  `MODEL_PRICING`（成本显示 `N/A`）；现网可用，未确认应改为何值，本次未改动。
+- `.env.example` 的 `API_HOST` 仍默认 `0.0.0.0`；README §十.3 建议 `0.0.0.0` 仅在内网/反代后使用。
+- CLI 终端审批是阻塞式 `input()`，无超时；API 模式仍保持 `APPROVE_TIMEOUT_S=300` 超时语义。
+- 工作区绝对化只在 `coder` 与自验守卫两处生效；`data_dir`/`log_dir`/`kb_dir` 仍为相对路径、
+  依赖进程 cwd（本次未改动，避免扩大影响面）。
+- **`uv run ruff check src` 现有 79 项既有告警，非本次引入**（报错集中在 `agents/base.py`、
+  `tools/workspace_files.py` 等未改动文件；48 项可 `--fix` 自动修，31 项需手修）。
+  根因：**仓库内没有任何 ruff 配置**（无 `ruff.toml`/`.ruff.toml`/`[tool.ruff]`），规则集来自
+  使用者本机的用户级配置 —— 而 `RUF100`/`I001` 并不在 ruff 默认规则集（`E4`/`E7`/`E9`/`F`）内。
+  因此 `ruff check src` **结果不可复现**，README §十二 作为门禁的那条名不副实。
+  待办：把规则集与 ruff 版本上界钉进 `pyproject.toml`，再单独清理。
+
 ## v1.0.1 — 生产就绪加固（P0/P1 完善）
 ### 目标
 - v1.0.0 架构就绪后，堵上**上线前必须处理**的稳定性/安全细节，达到可上线（单节点/局域网）标准，并补齐文档。

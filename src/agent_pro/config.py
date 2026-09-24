@@ -4,6 +4,7 @@
 from functools import lru_cache
 from pathlib import Path
 from langchain_openai import ChatOpenAI
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,9 +12,17 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
-    api_key: str
+    # 密钥来源: 优先 OPENAI_API_KEY(README/.env.example 的写法), 兼容 API_KEY(旧写法)
+    # 说明: 字段名 api_key 本身不在候选内, 故显式列入, 保证 Settings(api_key=...) 仍可用
+    api_key: str = Field(
+        validation_alias=AliasChoices("OPENAI_API_KEY", "API_KEY", "api_key")
+    )
     model_name: str = "deepseek-chat"
-    base_url: str | None = None
+    # 网关地址。与 api_key 同理: 文档/常见写法是 OPENAI_BASE_URL, 字段名本身不自动生效
+    base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENAI_BASE_URL", "BASE_URL", "base_url"),
+    )
     workspace_dir: Path = Path("./workspace")
     agent_recursion_limit: int = 80
     # v0.4: 数据目录（SQLite）与记忆参数

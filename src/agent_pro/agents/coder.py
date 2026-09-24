@@ -4,6 +4,8 @@
 #                  write_file/pip_install实时推送到task:{task_id}话题
 #                  ② 收编原base.py的TaskContext/AgentSpec/AgentRegistry
 #                  (现为本包唯一实现源，base.py仅再导出)
+#                → v1.0.2: 工作区解析为绝对路径并注入 system prompt
+#                  (沙箱 cwd 需要盘符; 原先示例路径硬编码的是作者机器路径)
 # 铁律不变: 动态描述必须走@tool(description=...)参数
 # ============================================================
 import time
@@ -132,8 +134,9 @@ CODER_SYSTEM_PROMPT = """你是 coder 专家Agent，负责在工作区生成真�
 3. 需要第三方依赖时用 pip_install 安装（包名+版本约束，多个用空格分隔）。
 4. 交付前自验（强烈推荐）：写完代码后，用 request_verification 在隔离沙箱
    执行验证命令（如跑测试/启动程序），执行前会请求用户人工确认。
-   - cwd_win 必须传本次任务的工作区绝对路径（工作区根 + 项目子目录，
-     例如当前工作区为 C:\\Users\\26024\\Desktop\\agent-pro\\workspace\\pomodoro）。
+   - cwd_win 必须传本次任务工作区的**绝对路径**（见下方【本次任务工作区】；
+     项目在子目录时传该子目录的绝对路径），省略则默认为工作区根。
+   - 执行目录会在工作区边界内做硬校验，越界会被直接拒绝。
    - 命令必须限定在工作区内；禁止读宿主机凭据(.env/ssh)或访问
      /mnt/c/Users 等宿主目录；沙箱允许出网以便 pip 安装依赖。
    - 若用户拒绝执行，说明无法自验并交付现状，不要编造运行结果。
@@ -146,13 +149,22 @@ CODER_SYSTEM_PROMPT = """你是 coder 专家Agent，负责在工作区生成真�
 
 def build_coder_agent(context: TaskContext | None = None) -> Runnable:
     settings = get_settings()
-    root = context.workspace_dir if context else settings.workspace_dir
+    # 解析为绝对路径: 沙箱执行目录(WSL 路径映射)需要盘符——相对路径会被原样
+    # 透传, 命令就在 WSL 家目录而非工作区里执行; 路径守卫也需要可比对的绝对根
+    root = (context.workspace_dir if context else settings.workspace_dir
+            ).expanduser().resolve()
     tools = make_workspace_tools(root, include_write=True) + [
         pip_install, request_verification]
+    # 注入真实工作区绝对路径(原先只在提示词里硬编码了作者机器的示例路径)
+    system_prompt = CODER_SYSTEM_PROMPT + (
+        "\n【本次任务工作区】\n"
+        f"绝对路径: {root}\n"
+        "所有文件操作与 request_verification 的 cwd_win 都以此为准; "
+        "项目放在子目录时, 传「该绝对路径 + 子目录」的完整绝对路径。\n")
     return create_agent(
         build_model(),
         tools=tools,
-        system_prompt=CODER_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
     )
 
 
