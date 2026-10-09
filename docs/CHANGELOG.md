@@ -1,4 +1,19 @@
 # Changelog
+## v1.0.3 — 根路径 `/` 重定向到 `/docs`
+### 问题
+- 服务启动后访问 `http://localhost:8000/` 返回 404（根路径从未定义路由），
+  人工调试必须记住 `/docs`，体验差且易误判为启动失败。
+### 决策
+- 三选一（重定向 / 返回服务信息 JSON / 保持 404）→ 用户拍板：**重定向到 /docs**。
+### 变更
+- `api/server.py`：新增 `GET /`，用 `RedirectResponse(url="/docs")`（默认 **307 临时重定向**，
+  不引入缓存语义）；`include_in_schema=False` 保持 OpenAPI 清单干净。
+### 验证
+- TestClient：`GET /` → 307 且 `location=/docs`；跟随重定向 → 200 落在 `/docs`。
+- 回归：`/health` 200（v1.0.2）；无 key 仍 401、正确 key 200（fail-closed 鉴权未受影响）。
+- pytest 全绿 18 项。
+- README「七、启动」补充根路径说明与端点清单。
+
 ## v1.0.2 — 修复 eval 静默缺陷（日志未初始化 / 无进度 / 无单条超时）
 ### 问题
 - `uv run python -m agent_pro.eval.runner` 整轮无任何输出，被误判为卡死而 Ctrl+C

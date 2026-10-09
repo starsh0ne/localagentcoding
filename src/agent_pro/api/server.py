@@ -12,7 +12,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from agent_pro import __version__
 from agent_pro.api.bus import get_event_bus
@@ -79,6 +79,18 @@ async def log_requests(request: Request, call_next):
             "status": response.status_code,
             "duration_s": round(duration, 3)})
     return response
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """根路径无业务语义: 浏览器访问直接落到 Swagger 交互文档。
+
+    此前根路径未定义路由 → 返回 404, 人工调试体验差(需记住 /docs)。
+    用 RedirectResponse 默认 307 临时重定向, 不引入缓存语义。
+    """
+    return RedirectResponse(url="/docs")
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": __version__}

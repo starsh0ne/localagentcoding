@@ -119,8 +119,11 @@ uv run python -m agent_pro.api
 # 或用 venv 直接: .venv/Scripts/python.exe -m agent_pro.api   (Windows)
 ```
 
-启动后：
-- `GET  /health` —— 健康检查（无需鉴权）
+启动后，浏览器直接打开 **http://localhost:8000/** 即可（根路径会 307 重定向到交互式 Swagger 文档 `/docs`）。
+
+主要端点：
+- `GET  /` —— 重定向到 `/docs`（Swagger 交互文档，无需鉴权）
+- `GET  /health` —— 健康检查（无需鉴权，适合做存活探针）
 - `POST /api/sessions` —— 新建会话，返回 `session_id`
 - `POST /api/sessions/{id}/chat` —— 提交一条消息，返回 `turn_id`
 - `GET  /api/chat/turns/{turn_id}` —— 轮次状态/结果
