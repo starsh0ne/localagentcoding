@@ -7,7 +7,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from agent_pro.embeddings import get_embedder
+from agent_pro.embeddings import get_embedder, safe_embed_query
 from agent_pro.kb.chunking import chunk_document
 from agent_pro.kb.parsers import parse_file, supported_extensions
 from agent_pro.kb.store import get_kb_store
@@ -44,11 +44,11 @@ def ingest_dir(kb_dir: Path, purge: bool = False) -> IngestReport:
             for c in chunk_document(doc):
                 emb = None
                 if embedder:
-                    try:
-                        emb = json.dumps(embedder.embed_query(c.content))
+                    vec = safe_embed_query(embedder, c.content)
+                    if vec is not None:
+                        emb = json.dumps(vec)
                         rep.embedded += 1
-                    except Exception:
-                        emb = None  # 单块嵌入失败→降级FTS, 不阻塞导入
+                    # 失败或熔断中 → emb=None: 单块降级FTS, 不阻塞导入
                 payload.append((c.heading_path, c.content, emb))
             store.replace_source(rel, doc.title, payload)
             rep.chunks += len(payload)

@@ -1,4 +1,24 @@
 # Changelog
+## v1.0.4 — embedding 熔断（服务不可用时不再逐条重试）+ 修复长期记忆 NameError
+### 问题
+- embedding 服务（`:8001`）不可用时，**每条检索都要等 SDK 退避重试约 4s** 才降级 FTS：
+  eval 12 条白等近 1 分钟，且日志被 `502 Bad Gateway` 重试噪声刷屏。
+### 变更
+- `embeddings.py`：新增熔断——`_breaker_until` 冷却窗口 + `embedding_disabled()` +
+  `mark_embedding_failure()` + `safe_embed_query()`。首次失败即打开熔断，窗口内**直接短路返回 None**
+  （不发请求），窗口过后自动半开探测，成功则关闭。
+- `embeddings.py`：`OpenAIEmbeddings(max_retries=0)`，服务不可用时快速失败（不再等 SDK 默认 2 次重试）。
+- `config.py`：新增 `embedding_breaker_cooldown_s`（默认 **300** 秒，覆盖一整轮 eval）。
+- 调用方 `kb/store.py`、`kb/ingest.py`、`memory/store.py` 统一改用 `safe_embed_query()`。
+### 顺带修复的真实缺陷
+- `memory/store.py` 的 `add_memory()` / `search_memories()` 调用了**从未定义的 `_get_embedder()`**
+  （导入的是 `get_embedder`）→ 真实 **NameError**。`add_memory` 被 `memory/manager.py:77`
+  实际调用（长期记忆落盘路径），一触发即崩。已改为 `get_embedder()` 并补回归测试。
+### 验证
+- 功能实测：首次失败 2.09s（原约 4s+），后续 3 次均 **0.0000s** 短路，告警只打一条。
+- 新增 `tests/test_embedding_breaker.py` 5 项（短路 / 冷却后恢复 / 未启用短路 / 手动标记 /
+  长期记忆 NameError 回归）；pytest 全绿 **23 项**。
+
 ## v1.0.3 — 根路径 `/` 重定向到 `/docs`
 ### 问题
 - 服务启动后访问 `http://localhost:8000/` 返回 404（根路径从未定义路由），

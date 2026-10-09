@@ -11,7 +11,7 @@ import threading
 from functools import lru_cache
 from pathlib import Path
 from agent_pro.config import get_settings
-from agent_pro.embeddings import cosine, get_embedder
+from agent_pro.embeddings import cosine, get_embedder, safe_embed_query
 
 RRF_K = 60
 CANDIDATES = 20
@@ -89,12 +89,8 @@ class KBStore:
     def search(self, query: str, limit: int = 5) -> list[dict]:
         """混合检索: 向量+FTS5各取候选 → RRF融合 → top-limit"""
         embedder = get_embedder()
-        q_emb = None
-        if embedder:
-            try:
-                q_emb = embedder.embed_query(query)  # 网络调用在锁外
-            except Exception:
-                q_emb = None
+        # 带熔断: 服务不可用时窗口内直接短路(None), 不再每条等退避重试
+        q_emb = safe_embed_query(embedder, query) if embedder else None
         with self._lock:
             vec_ids: list[int] = []
             if q_emb:

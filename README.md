@@ -91,6 +91,8 @@ cp .env.example .env
 | `REDIS_URL` | 状态/队列持久化后端 | 空=默认 `redis://localhost:6379`（不可用降级内存） |
 | `KB_DIR` | 知识库文档目录 | `./knowledge` |
 | `EMBEDDING_MODEL` | 留空=降级纯 FTS5 | 如 `BAAI/bge-m3` |
+| `EMBEDDING_BREAKER_COOLDOWN_S` | Embedding 熔断冷却（秒） | `300` |
+| `EVAL_ITEM_TIMEOUT_S` | 评测单条超时（秒） | `120` |
 | `LOG_LEVEL` / `LOG_DIR` | 日志级别 / 目录 | `INFO` / `./logs` |
 
 ---
@@ -107,6 +109,15 @@ uv run python -m agent_pro.kb search "关键词"   # 调试检索
 ```
 
 > 未配置 Embedding 时检索自动降级为纯全文检索，仍可正常溯源。
+>
+> **Embedding 熔断**：若配了 Embedding 但服务不可用（如 WSL 上的服务未启动），
+> 首次失败后会**开启熔断**（冷却 `EMBEDDING_BREAKER_COOLDOWN_S`，默认 300s），
+> 窗口内直接短路、不再逐条重试——避免每条白等约 4s 的退避重试。
+> 冷却结束后自动半开探测一次，恢复可用则关闭熔断。
+>
+> 注意：若本机设了 `HTTP_PROXY` 而 `NO_PROXY` 未含 `127.0.0.1`，对本地 Embedding
+> 服务的请求会被代理接管，服务未起时表现为 `502 Bad Gateway`（而非连接拒绝）。
+> 排查时先确认 `NO_PROXY=localhost,127.0.0.1,::1`。
 
 ---
 

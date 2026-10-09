@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     embedding_model: str = ""
     embedding_base_url: str | None = None
     embedding_api_key: str | None = None
+    # v1.0.4: embedding 熔断冷却(秒); 服务不可用时窗口内不再重试, 直接降级 FTS
+    embedding_breaker_cooldown_s: int = 300
     # v0.5: API服务（局域网测试，预留公网暴露）
     api_host: str = "127.0.0.1"  # 局域网测试设 0.0.0.0
     api_port: int = 8000

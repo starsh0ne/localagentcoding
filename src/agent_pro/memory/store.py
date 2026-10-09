@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from agent_pro.config import get_settings
-from agent_pro.embeddings import cosine, get_embedder
+from agent_pro.embeddings import cosine, get_embedder, safe_embed_query
 
 
 KINDS = ("preference", "fact", "entity")
@@ -143,13 +143,13 @@ class MemoryDB:
                    source_session: str | None = None) -> None:
         if kind not in KINDS or not content.strip():
             return
-        embedder = _get_embedder()
+        # 修正: 此前误用未定义的 _get_embedder(真实 NameError, 长期记忆落盘会崩)
+        embedder = get_embedder()
         emb = None
-        if embedder:  # 网络调用在锁外
-            try:
-                emb = json.dumps(embedder.embed_query(content))
-            except Exception:
-                emb = None
+        if embedder:  # 网络调用在锁外(带熔断, 失败/熔断中返回 None)
+            vec = safe_embed_query(embedder, content)
+            if vec is not None:
+                emb = json.dumps(vec)
         with self._lock:
             if self._conn().execute(
                     "SELECT 1 FROM long_term_memories WHERE kind=? AND content=?",
@@ -174,13 +174,9 @@ class MemoryDB:
             return [dict(r) for r in rows]
 
     def search_memories(self, query: str, limit: int = 5) -> list[dict]:
-        embedder = _get_embedder()  # 锁外
-        q_emb = None
-        if embedder:
-            try:
-                q_emb = embedder.embed_query(query)
-            except Exception:
-                q_emb = None
+        # 修正: 同上, _get_embedder 未定义 → 用 get_embedder
+        embedder = get_embedder()  # 锁外
+        q_emb = safe_embed_query(embedder, query) if embedder else None
         with self._lock:
             rows = self._conn().execute(
                 "SELECT id, kind, content, embedding FROM long_term_memories"
