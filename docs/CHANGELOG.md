@@ -1,4 +1,24 @@
 # Changelog
+## v1.0.2 — 修复 eval 静默缺陷（日志未初始化 / 无进度 / 无单条超时）
+### 问题
+- `uv run python -m agent_pro.eval.runner` 整轮无任何输出，被误判为卡死而 Ctrl+C
+  （traceback 终点是 `KeyboardInterrupt`，并非崩溃）。
+### 根因
+- `setup_logging()` 全项目**仅在 `api/__main__.py:10` 被调用**；eval 作为 CLI 入口**从未初始化日志**
+  → 无 handler 时 Python 丢弃 INFO 级日志（仅 WARNING+ 走 lastResort）→ 控制台与文件日志**双失效**，
+  连 `log.info("eval item 完成")` 都一条不输出，整轮 2~6 分钟静默。
+### 修复
+- `eval/runner.py` `main()`：补 `setup_logging(level, log_dir)`，日志恢复（控制台 + 轮转文件）。
+- `eval/runner.py` `run_eval()`：每条输出 stdout 进度行 `[i/N] 命中|未引用 Xs — 问题…`。
+- `eval/runner.py` 新增 `_invoke_with_timeout()`：守护线程 + `join(timeout)` 软超时，
+  单条卡死不再拖垮整轮；用 `contextvars.copy_context()` 显式带入线程以保住日志上下文
+  （实测线程内 LLM 日志仍带 `agent`/`model` 字段，已验证）。
+- `config.py` 新增 `eval_item_timeout_s`（默认 120 秒）。
+### 验证
+- 完整 12 条重跑：已回答 12/12，**引用命中 12/12 = 100%**，平均延迟 13.9s（v1.0.1 那次为 92%）。
+- pytest 全绿 **18 项**（新增 `tests/test_eval_timeout.py` 2 项：超时及时返回 / contextvars 跨线程）。
+- 注：该指标依赖模型是否回显来源文件名，两次实测 92% / 100%，对外建议仍沿用保守值。
+
 ## v1.0.1 — 生产就绪加固（P0/P1 完善）
 ### 目标
 - v1.0.0 架构就绪后，堵上**上线前必须处理**的稳定性/安全细节，达到可上线（单节点/局域网）标准，并补齐文档。

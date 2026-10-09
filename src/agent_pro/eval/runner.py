@@ -5,7 +5,9 @@
 # 说明: 数据集覆盖 knowledge/ 私有文档; 问题设计刻意触发 search_knowledge,
 #       以测量"检索是否真的被引用(可溯源)"——即简历里的"检索命中率"。
 # ============================================================
+import contextvars
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,7 +15,8 @@ from pathlib import Path
 from agent_pro.agents import create_app_agent
 from agent_pro.config import get_settings
 from agent_pro.observability import (context, get_logger, reset_cost_handler,
-                                     set_cost_handler, TokenUsageCallbackHandler)
+                                     set_cost_handler, setup_logging,
+                                     TokenUsageCallbackHandler)
 from agent_pro.kb.ingest import ingest_dir
 from agent_pro.kb.store import get_kb_store
 
@@ -64,6 +67,39 @@ def ensure_kb() -> None:
         log.info("KB 导入完成", extra={"report": str(rep)})
 
 
+def _invoke_with_timeout(agent, question: str, settings, cost,
+                         timeout_s: int) -> dict:
+    """在守护线程内跑 agent.invoke, 超时抛 TimeoutError(单条失败不拖垮整轮)。
+
+    背景: agent.invoke 同步阻塞, 无法被事件/信号中断; 单条若卡在超长 LLM 请求会
+    拖死整轮评测。这里用「守护线程 + join(timeout)」软超时——超时后线程被弃用,
+    因是 daemon 线程故不阻塞进程退出。
+    陷阱: contextvars 不会自动跨线程, 必须 copy_context() 显式带入, 否则日志上下文
+    (agent/model/turn) 在新线程里会丢失。
+    """
+    box: dict = {}
+
+    def _target() -> None:
+        try:
+            box["result"] = agent.invoke(
+                {"messages": [("user", question)]},
+                config={"recursion_limit": settings.agent_recursion_limit,
+                        "callbacks": [cost]})
+        except Exception as e:  # 传回主线程, 由 run_one 统一处理
+            box["error"] = e
+
+    ctx = contextvars.copy_context()
+    t = threading.Thread(target=lambda: ctx.run(_target),
+                         name="eval-item", daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    if t.is_alive():
+        raise TimeoutError(f"单条评测超时(>{timeout_s}s), 已跳过")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result") or {}
+
+
 def run_one(item: EvalItem) -> dict:
     settings = get_settings()
     agent = create_app_agent()
@@ -72,10 +108,8 @@ def run_one(item: EvalItem) -> dict:
     started = time.monotonic()
     with context(agent="general", model=settings.model_name):
         try:
-            result = agent.invoke(
-                {"messages": [("user", item.question)]},
-                config={"recursion_limit": settings.agent_recursion_limit,
-                         "callbacks": [cost]})
+            result = _invoke_with_timeout(agent, item.question, settings, cost,
+                                          settings.eval_item_timeout_s)
             msgs = result.get("messages", [])
             answer = str(msgs[-1].content) if msgs else "(无输出)"
         except Exception as e:  # 单条失败不中断整体
@@ -105,7 +139,7 @@ def run_one(item: EvalItem) -> dict:
 def run_eval(items: list[EvalItem]) -> EvalReport:
     ensure_kb()
     rep = EvalReport(total=len(items))
-    for it in items:
+    for i, it in enumerate(items, 1):
         r = run_one(it)
         rep.items.append(r)
         if r["answered"]:
@@ -114,7 +148,12 @@ def run_eval(items: list[EvalItem]) -> EvalReport:
             rep.citation_hits += 1
         rep.avg_latency_s += r["latency_s"]
         rep.total_cost_usd += r["cost_usd"]
-        log.info("eval item 完成", extra={"cited": r["cited"], "q": it.question[:40]})
+        # 进度打到 stdout: 此前 eval 未初始化日志, 全程静默被误判为卡死
+        flag = "命中" if r["cited"] else "未引用"
+        print(f"[{i}/{len(items)}] {flag} {r['latency_s']}s "
+              f"— {it.question[:40]}", flush=True)
+        log.info("eval item 完成", extra={"cited": r["cited"],
+                                          "q": it.question[:40]})
     if rep.total:
         rep.citation_hit_rate = rep.citation_hits / rep.total
         rep.avg_latency_s = rep.avg_latency_s / rep.total
@@ -123,7 +162,12 @@ def run_eval(items: list[EvalItem]) -> EvalReport:
 
 def main() -> None:
     s = get_settings()
+    # 关键: eval 是 CLI 入口, 此前从未初始化日志 → 无 handler 导致 INFO 全被丢弃,
+    # 控制台与文件日志双双失效(整轮静默, 易被误判卡死)。
+    setup_logging(level=s.log_level, log_dir=s.log_dir)
     items = load_dataset(s.eval_dataset_path)
+    print(f"数据集 {len(items)} 条 | 单条超时 {s.eval_item_timeout_s}s "
+          f"| 日志目录 {s.log_dir}", flush=True)
     rep = run_eval(items)
     print(rep)
     print(json.dumps(rep.items, ensure_ascii=False, indent=2))

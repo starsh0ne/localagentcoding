@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     queue_maxsize: int = 1000        # 队列上限(背压): 满则提交返回 429, 防内存无限增长
     # v1.0: 评测数据集路径
     eval_dataset_path: Path = Path("./eval/gold_dataset.json")
+    # v1.0.2: 评测单条超时(秒); 防单条卡在超长 LLM 请求拖垮整轮
+    eval_item_timeout_s: int = 120
 
 
 @lru_cache
