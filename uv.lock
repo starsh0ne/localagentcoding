@@ -10,7 +10,7 @@ resolution-markers = [
 
 [[package]]
 name = "agent-pro"
-version = "1.0.2"
+version = "1.0.4"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
