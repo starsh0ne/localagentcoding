@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     memory_short_term_rounds: int = 5  # 短期记忆保留轮数
     memory_compact_batch: int = 5  # 每攒够5轮新对话触发一次压缩
+    # v1.1: 长期记忆召回/有效期/融合系数
+    memory_recall_top_k: int = 5   # 每轮长期记忆语义召回条数
+    memory_default_ttl_s: int = 0  # 长期记忆默认有效期(秒); 0=永不过期
+    memory_rrf_k: int = 60         # RRF 融合系数(与 kb/store.py 保持一致)
     # v0.4: 长期记忆向量检索（OpenAI兼容协议；留空=降级FTS5关键词检索）
     embedding_model: str = ""
     embedding_base_url: str | None = None

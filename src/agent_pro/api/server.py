@@ -3,6 +3,7 @@
 # 鉴权: X-API-Key头，fail-closed(空key拒绝启动)，/health豁免
 # SSE: 轮次流带回放(支持晚连接/Last-Event-ID重连); 任务流以DB为
 #      准(先订阅→读历史→pid去重，防订阅与读库间丢事件)
+# v1.1: 会话/聊天端点接受可选作用域(user_id/project_id/agent_id), 用于记忆隔离
 # ============================================================
 import asyncio
 import json
@@ -19,7 +20,7 @@ from agent_pro.api.bus import get_event_bus
 from agent_pro.api.queue import QueueFullError
 from agent_pro.api.worker import get_worker
 from agent_pro.config import get_settings
-from agent_pro.memory.store import get_memory_db
+from agent_pro.memory.store import Scope, get_memory_db
 from agent_pro.observability import context, get_logger
 from agent_pro.api.state_store import get_state_store
 from agent_pro.sandbox.wsl_exec import run_in_wsl
@@ -35,7 +36,28 @@ async def require_api_key(x_api_key: str | None = Header(default=None, alias="X-
         raise HTTPException(status_code=401, detail="missing api key")
     if x_api_key != get_settings().api_auth_key:
         raise HTTPException(status_code=401, detail="invalid api key")
-class ChatBody(BaseModel):
+class ScopeFields(BaseModel):
+    """v1.1 记忆隔离作用域: 三层可选, 缺省 'default'(向后兼容)。"""
+
+    user_id: str = Field(default="default", max_length=128)
+    project_id: str = Field(default="default", max_length=128)
+    agent_id: str = Field(default="default", max_length=128)
+
+    def resolve(self, fallback: Scope | None = None) -> Scope:
+        """未显式传的字段回退到 fallback(会话创建时的作用域); 空串按 default。"""
+        fb = fallback or Scope()
+        sent = self.model_fields_set
+        def pick(name: str, cur: str, old: str) -> str:
+            if name not in sent:
+                return old
+            v = (cur or "").strip()
+            return v or "default"
+        return Scope(pick("user_id", self.user_id, fb.user_id),
+                     pick("project_id", self.project_id, fb.project_id),
+                     pick("agent_id", self.agent_id, fb.agent_id))
+
+
+class ChatBody(ScopeFields):
     message: str = Field(..., max_length=100_000,
                          description="用户消息(≤100KB)")
 
@@ -95,26 +117,38 @@ async def root():
 async def health():
     return {"status": "ok", "version": __version__}
 @app.post("/api/sessions")
-async def new_session(_: None = Depends(require_api_key)):
-    return {"session_id":
-            f"s-{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"}
+async def new_session(body: ScopeFields | None = None,
+                      _: None = Depends(require_api_key)):
+    """创建会话; body 可选 user_id/project_id/agent_id(默认 'default')。"""
+    scope = (body or ScopeFields()).resolve()
+    session_id = f"s-{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
+    get_memory_db().ensure_session(session_id, scope)
+    log.info("创建 session", extra={"event_kind": "session_create",
+                                    "session_id": session_id, **scope._asdict()})
+    return {"session_id": session_id, **scope._asdict()}
 @app.post("/api/sessions/{session_id}/chat")
 async def chat(session_id: str, body: ChatBody, _: None = Depends(require_api_key)):
     if len(session_id) > 128:
         raise HTTPException(status_code=400, detail="session_id 过长(≤128)")
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="message不能为空")
+    db = get_memory_db()
+    # v1.1: 未传作用域字段 → 回退到该会话创建时的作用域
+    scope = body.resolve(db.get_scope(session_id))
     # v0.9(#29): 惰性创建 session — 不存在则建(返回是否新建用于日志), 不再静默用任意字符串
-    created = get_memory_db().ensure_session(session_id)
+    created = db.ensure_session(session_id, scope)
     if created:
         log.info("惰性创建 session", extra={"event_kind": "session_create",
-                                            "session_id": session_id})
+                                            "session_id": session_id,
+                                            **scope._asdict()})
     try:
-        turn = await get_worker().submit(session_id, body.message.strip())
+        turn = await get_worker().submit(session_id, body.message.strip(),
+                                         scope=scope)
     except QueueFullError:
         # 背压: 队列已满, 拒绝新增提交(防内存无限增长)
         raise HTTPException(status_code=429, detail="队列已满，请稍后重试")
-    return {"turn_id": turn.turn_id, "session_id": session_id, "status": turn.status}
+    return {"turn_id": turn.turn_id, "session_id": session_id,
+            "status": turn.status}
 @app.get("/api/chat/turns/{turn_id}")
 async def turn_status(turn_id: str, _: None = Depends(require_api_key)):
     turn = get_worker().get(turn_id)

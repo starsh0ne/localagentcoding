@@ -43,7 +43,8 @@ def main():
         if not user_input:
             continue
         session.append_user(user_input)
-        messages = session.build_messages()  # 每轮从DB重建: 摘要+偏好+最近5轮
+        # 每轮从DB重建: 摘要 + 按本轮query语义召回的长期记忆 + 最近5轮
+        messages = session.build_messages(query=user_input)
         cost = TokenUsageCallbackHandler(default_model=settings.model_name)
         cost_token = set_cost_handler(cost)
         final = None

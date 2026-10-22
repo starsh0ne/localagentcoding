@@ -1,4 +1,51 @@
 # Changelog
+## v1.1.0 — 记忆系统完善（隔离 / 召回 / RRF / TTL）
+### 问题
+- 隔离只有 session 一级：`user_id / project_id / agent_id` 全库 0 命中，多用户/多项目共库会互相读到记忆。
+- 取回非语义：每轮固定灌「摘要 + 全部 preference(limit=20)」，`fact` / `entity` 两类记忆**读不到**
+  （`search_memories()` 是死代码，生产零调用）。
+- 检索质量落后同项目 KB 一档：记忆侧是「有向量只用向量 / 否则只用 FTS」的**互斥降级**，
+  而 KB 已是 RRF 混合（`kb/store.py:117-121`，k=60、候选 20）。
+- 真实缺陷：`store.py` 向量分支调用未定义的 `_cosine()`（导入的是 `cosine`）→ 一旦配置
+  embedding，检索必抛 **NameError**。
+- 长期记忆无有效期，永不清理。
+### 决策（已拍板）
+- B1 隔离 = user + project + agent **三层全加**；B2 取回 = 摘要常驻 + 每轮语义 top-k；
+  B3 存储 = 继续 SQLite，检索对齐 KB 的 RRF 混合；B4 分层 = 保持短期+长期两层，只补召回/隔离/TTL。
+### 变更
+- `memory/store.py`：
+  - `sessions` 与 `long_term_memories` 新增 `user_id / project_id / agent_id`
+    （`TEXT NOT NULL DEFAULT 'default'`）+ 联合索引 `idx_ltm_scope` / `idx_session_scope`；
+    旧库自动 `ALTER TABLE` 迁移，历史数据落到 `default` 作用域，不丢数据。
+  - **所有长期记忆读写查询强制带作用域条件**（`LIVE` 条件常量）；`source_session` 保留作溯源，不参与隔离。
+  - 新增 `Scope(user_id, project_id, agent_id)` 值对象；`ensure_session(sid, scope)` 写入作用域，
+    新增 `get_scope(sid)`；会话作用域以**创建时**为准。
+  - `search_memories()` 重写为 **RRF 混合**：向量 top-20 + FTS5 top-20 → RRF(k=`memory_rrf_k`) 融合 →
+    top-limit，与 `kb/store.py` 对齐；任一路径不可用（未配 embedding / 熔断中 / FTS 无命中）仍由另一路返回；
+    两路皆无命中时保留 v1.0 的 LIKE 兜底（中文整串无分词，FTS5 常无命中）。
+  - 修掉 `_cosine` → `cosine` 的 **NameError**。
+  - 新增 `expires_at TEXT NULL` + `purge_expired()`（含 FTS 索引清理，幂等）；检索/列举时顺带清理，
+    过期条目一律不召回；`add_memory(..., ttl_s=)` 支持按条指定有效期。
+- `memory/manager.py`：`_context_message(query)` 改为两段式——摘要**常驻** + 长期记忆按当前 query
+  语义检索 top-k，按 `preference / fact / entity` 分节注入（三类均可召回）。
+  压缩写入长期记忆时带作用域。
+- `api/server.py`：`POST /api/sessions` 与 `POST /api/sessions/{sid}/chat` body 支持可选
+  `user_id / project_id / agent_id`（默认 `default`，≤128）；chat 未传则**回退到该会话创建时的作用域**。
+  既有 `session_id ≤128`、`message ≤100000` 校验保持不变。
+- `api/worker.py`：`Turn` 透传作用域，`_execute` 传给 `SessionManager`；每轮以用户消息为 query 召回。
+- `config.py` 新增：`memory_recall_top_k`(**5**)、`memory_default_ttl_s`(**0**=不过期)、`memory_rrf_k`(**60**)。
+- 删除空壳 `memory/session.py`（仅 TODO，全库无引用）。
+### 验证
+- 新增 `tests/test_v1_1_memory.py` **21 项**：三层隔离 / default 向后兼容 / 旧库迁移 /
+  三类记忆召回 / top-k / RRF 双路融合 / 向量路与 FTS 路各自单路可用 / 熔断中仍召回 /
+  TTL 过期不召回 + 清理幂等 / API 作用域落库与回退 / 既有长度校验。
+- pytest 全绿 **44 项**（既有 23 项 + 新增 21 项）。
+- 手工实测：`SessionManager.build_messages(query=...)` 输出「摘要 + 偏好 + 事实 + 实体」分节，
+  且无关 query 不再召回无关记忆。
+### 未做（记为债务）
+- 语义级去重（当前仍是精确去重）；working memory / episodic 层；外部向量库（Chroma/FAISS）；
+  压缩触发仍按轮数不看 token。
+
 ## v1.0.4 — embedding 熔断（服务不可用时不再逐条重试）+ 修复长期记忆 NameError
 ### 问题
 - embedding 服务（`:8001`）不可用时，**每条检索都要等 SDK 退避重试约 4s** 才降级 FTS：

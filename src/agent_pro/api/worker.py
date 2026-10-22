@@ -18,6 +18,7 @@ from agent_pro.config import get_settings
 from agent_pro.api.queue import QueueFullError, TurnQueue, get_turn_queue
 from agent_pro.api.state_store import get_state_store
 from agent_pro.memory.manager import SessionManager
+from agent_pro.memory.store import Scope
 from agent_pro.observability import (context, get_logger, reset_cost_handler,
                                      set_cost_handler, TokenUsageCallbackHandler)
 
@@ -41,6 +42,13 @@ class Turn:
     result: str | None = None  # 内存态; 重启丢失→history接口兜底
     error: str | None = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    # v1.1: 记忆作用域(user/project/agent), 透传给 SessionManager
+    user_id: str = "default"
+    project_id: str = "default"
+    agent_id: str = "default"
+
+    def scope(self) -> Scope:
+        return Scope(self.user_id, self.project_id, self.agent_id)
 
 
 class TurnWorker:
@@ -48,10 +56,13 @@ class TurnWorker:
         self.turns: dict[str, Turn] = {}
         self._turns_lock = threading.Lock()  # v1.0: turns 字典跨线程(提交/查询/回收)保护
 
-    async def submit(self, session_id: str, message: str) -> Turn:
+    async def submit(self, session_id: str, message: str,
+                     scope: Scope | None = None) -> Turn:
         turn = Turn(
             turn_id=f"turn-{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}",
             session_id=session_id, message=message)
+        if scope is not None:
+            turn.user_id, turn.project_id, turn.agent_id = scope
         with self._turns_lock:
             self.turns[turn.turn_id] = turn
         try:
@@ -170,9 +181,9 @@ class TurnWorker:
         started = time.monotonic()
         with context(session_id=turn.session_id, turn_id=turn.turn_id,
                      agent="general", model=settings.model_name):
-            session = SessionManager(turn.session_id)
+            session = SessionManager(turn.session_id, scope=turn.scope())
             session.append_user(turn.message)
-            messages = session.build_messages()
+            messages = session.build_messages(query=turn.message)
             final = None
             for update in get_app_agent().stream(
                     {"messages": messages}, stream_mode="updates",
