@@ -117,6 +117,21 @@ def test_session_scope_persisted_and_read_back(db):
     assert db.get_scope("s-scope") == Scope("u9", "p9", "a9")
 
 
+def test_session_manager_scope_partial_override_and_fallback(db, monkeypatch):
+    from agent_pro.memory import manager as manager_mod
+
+    monkeypatch.setattr(manager_mod, "get_memory_db", lambda: db)
+    sid = "s-scope-override"
+    session_scope = Scope("u1", "p1", "a1")
+    db.ensure_session(sid, session_scope)
+
+    assert manager_mod.SessionManager(sid).scope == session_scope
+    assert manager_mod.SessionManager(
+        sid, Scope("u2", "", "")).scope == Scope("u2", "p1", "a1")
+    assert db.get_scope(sid) == session_scope
+    assert manager_mod.SessionManager(sid, None).scope == session_scope
+
+
 # ---------- 2. 召回: 三类记忆可读 ----------
 def test_recall_covers_fact_and_entity(db):
     """v1.0 只取 preference, fact/entity 读不到 → 此处钉死三类均可召回。"""

@@ -45,8 +45,13 @@ class SessionManager:
         self.top_k = max(1, s.memory_recall_top_k)
         self.db = get_memory_db()
         self.db.ensure_session(session_id, scope)
-        # 已存在的会话以「创建时的作用域」为准(API 未传作用域时回退到此)
-        self.scope = self.db.get_scope(session_id) or Scope()
+        # 传入的非空字段逐项覆盖; 未传字段回退到会话创建时的作用域
+        session_scope = self.db.get_scope(session_id) or Scope()
+        self.scope = Scope(
+            scope.user_id if scope and scope.user_id else session_scope.user_id,
+            scope.project_id if scope and scope.project_id else session_scope.project_id,
+            scope.agent_id if scope and scope.agent_id else session_scope.agent_id,
+        )
 
     def append_user(self, text: str) -> None:
         self.db.append_user(self.sid, text)
